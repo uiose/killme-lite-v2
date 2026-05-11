@@ -96,6 +96,24 @@ class RouterFlowTests(unittest.TestCase):
         self.assertIn("已保存 checkpoint", checkpoint)
         self.assertEqual(after["round"], before["round"] + 1)
 
+    def test_contextual_followup_does_not_update_user_position(self) -> None:
+        self.start()
+        self.router.handle_line("/build")
+        before = self.router.storage.load_latest_state()
+        assert before is not None
+
+        output = self.router.handle_line("这是什么意思，什么的方案")
+        after = self.router.storage.load_latest_state()
+        assert after is not None
+
+        self.assertEqual(after["user_position"], before["user_position"])
+        self.assertIn("Builder", output)
+        self.assertIn("没有写入 user_position", output)
+
+        turns = self.router.storage.recent_turns(after["session_id"], limit=5)
+        assistant_turns = [turn for turn in turns if turn["speaker"] == "assistant"]
+        self.assertEqual(assistant_turns[-1]["metadata"]["type"], "contextual_answer")
+
     def test_spawn_refuses_to_exceed_configured_limit(self) -> None:
         self.start()
         self.router.handle_line("/config judge 1")

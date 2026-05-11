@@ -50,6 +50,7 @@ def run_script(router: Router, script_path: str) -> int:
 
 
 def repl(router: Router) -> int:
+    router.progress = lambda message: print(message, flush=True)
     print("killme-lite CLI")
     print("Type /start <idea> to begin. Type Ctrl-D or /quit to exit.")
     while True:

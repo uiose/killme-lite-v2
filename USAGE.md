@@ -407,7 +407,31 @@ uv run python main.py --db ./data/real-llm-smoke.sqlite
 | `/reset` | 清空本地 sessions、turns、state_snapshots、clone_runs | 本地开发或测试时重置数据 |
 | `/quit` | 退出 CLI | 结束当前 REPL |
 
+不以 `/` 开头的自然语言输入会被分成两类：
+
+- 追问/澄清：例如 `这是什么意思，什么的方案`、`为什么这么判断？`、`展开一下第二点`。系统会基于 recent turns 回答，不写入 `user_position`。
+- 长期约束/立场更新：例如 `我的约束是不能接真实写接口`、`我希望先做离线验证`。系统会合并进 `user_position`，供后续 Chair 和角色参考。
+
+如果你想明确新增长期约束，推荐写成：
+
+```text
+我的约束是：第一阶段不能接真实写 API，只能做离线回放。
+```
+
 `/auto <n>` 的 `n` 是调度步数，不是对话轮数。一次调度可能调用一个角色，也可能生成 clones 并触发 Merger。项目故意限制单次最多 3 步，避免早期错误判断被自动放大。
+
+真实 LLM 模式下，`/auto 3` 可能触发多次串行 API 调用。交互式 CLI 会打印步骤级即时输出：
+
+```text
+[running] auto step 1: asking Chair for the next move
+[chair] spawn_clones -> executioner x3: 当前 major question 尚缺少清晰攻击面。
+[running] calling Executioner-1 (1/3)
+[Executioner-1] strongest: ...
+[running] merging 3 executioner clone output(s)
+[merger] strongest merged point: ...
+```
+
+如果长时间停在某个 clone，通常表示正在等待该次 LLM 请求返回。
 
 `/spawn` 只支持非 Chair 角色：
 

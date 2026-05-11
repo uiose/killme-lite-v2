@@ -2,10 +2,10 @@ import copy
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config import AppConfig, load_config
-from llm import LLMClient
+from llm import LLMClient, extract_json
 from merger import merge_clone_outputs
 from state import (
     MAX_CLONE_LIMIT,
@@ -44,11 +44,13 @@ class Router:
         base_dir: Path,
         db_path: Optional[Path] = None,
         config: Optional[AppConfig] = None,
+        progress: Optional[Callable[[str], None]] = None,
     ):
         self.base_dir = Path(base_dir)
         self.config = config or load_config(self.base_dir)
         self.storage = Storage(db_path or self.config.db_path)
         self.llm = LLMClient(base_dir=self.base_dir, config=self.config)
+        self.progress = progress
 
     def handle_line(self, line: str) -> str:
         if line.startswith("/"):
@@ -290,23 +292,58 @@ class Router:
 
     def handle_user_message(self, text: str) -> str:
         state = self._require_state()
+        text = text.strip()
+        if not text:
+            return ""
+        if self._is_contextual_question(text):
+            return self._handle_contextual_question(state, text)
+
         state = increment_round(state)
         previous_position = state.get("user_position", "")
-        state["user_position"] = merge_user_position(previous_position, text.strip())
+        state["user_position"] = merge_user_position(previous_position, text)
         state["requires_user_intervention"] = False
         self.storage.save_turn(
             state["session_id"],
             state["round"],
             "user",
-            text.strip(),
-            {"previous_user_position": previous_position, "updated_user_position": state["user_position"]},
+            text,
+            {
+                "type": "user_position_update",
+                "previous_user_position": previous_position,
+                "updated_user_position": state["user_position"],
+            },
         )
         self.storage.save_snapshot(state["session_id"], state)
         return "已合并用户输入到 user_position，而不是覆盖旧约束。可继续 /auto 3、/exec、/spawn、/defend、/build、/judge、/summary 或 /close。"
 
+    def _handle_contextual_question(self, state: Dict[str, Any], text: str) -> str:
+        recent_before = self.storage.recent_turns(state["session_id"], limit=10)
+        state = increment_round(state)
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "user",
+            text,
+            {"type": "contextual_question", "user_position_unchanged": True},
+        )
+
+        answer = self._answer_contextual_question(state, text, recent_before)
+        state = increment_round(state)
+        state["requires_user_intervention"] = True
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "assistant",
+            answer,
+            {"type": "contextual_answer", "user_position_unchanged": True},
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        return answer + "\n\n（这次追问没有写入 user_position；如果你是在新增长期约束，可以直接说“我的约束是...”。）"
+
     def _chair_step(self, auto_step: int) -> str:
         state = self._require_state()
         recent = self.storage.recent_turns(state["session_id"], limit=8)
+        self._progress(f"auto step {auto_step}: asking Chair for the next move")
         raw_decision = self.llm.call_agent(
             "chair",
             state=state,
@@ -327,6 +364,8 @@ class Router:
         self.storage.save_snapshot(state["session_id"], state)
 
         decision_type = decision["decision_type"]
+        self._progress(f"auto step {auto_step}: Chair decided {decision_type}")
+        self._emit_chair_decision(decision)
         if decision_type == "wait_user":
             state["requires_user_intervention"] = True
             self._save_state(state)
@@ -336,6 +375,7 @@ class Router:
             role = decision.get("role_to_call") or ("judge" if decision_type == "judge" else None)
             if role not in VALID_ROLES:
                 return f"Chair 决策无效：role_to_call={role}"
+            self._progress(f"auto step {auto_step}: running {role}")
             result, _ = self._run_role(role, task=decision.get("message_to_user") or decision.get("reason") or "")
             return self._format_chair_decision(decision) + "\n\n" + self._format_agent_result(result)
 
@@ -351,6 +391,7 @@ class Router:
                 role,
                 count,
             )
+            self._progress(f"auto step {auto_step}: running {count} {role} clone(s)")
             result, _ = self._run_role(role, task=decision.get("reason") or "", clone_tasks=clone_tasks)
             return self._format_chair_decision(decision) + "\n\n" + self._format_agent_result(result)
 
@@ -359,6 +400,7 @@ class Router:
                 state["requires_user_intervention"] = True
                 self._save_state(state)
                 return self._close_refusal_message()
+            self._progress(f"auto step {auto_step}: closing current major question")
             closing, _ = self._close_question(state, existing_decision=decision)
             return closing
 
@@ -377,6 +419,7 @@ class Router:
         if clone_tasks is None:
             clone_tasks = [{"name": role, "angle": "single instance", "task": task}]
         clone_tasks = sanitize_clone_tasks(clone_tasks, role, len(clone_tasks))
+        self._progress(f"running {role}: {len(clone_tasks)} instance(s)")
         clone_group_id = ""
         if len(clone_tasks) > 1:
             clone_group_id = f"{role}-{base_state_snapshot.get('round', 0) + 1}-{uuid.uuid4().hex[:8]}"
@@ -390,18 +433,22 @@ class Router:
         run_state = ensure_shape(copy.deepcopy(base_state_snapshot))
 
         try:
-            for clone in clone_tasks:
+            for index, clone in enumerate(clone_tasks, start=1):
                 # All clones receive the same state and recent-turn snapshot. No clone
                 # sees state patches or turns produced by siblings in this batch.
+                clone_name = clone.get("name") or role
+                self._progress(f"calling {clone_name} ({index}/{len(clone_tasks)})")
                 raw_output = self.llm.call_agent(
                     role,
                     state=copy.deepcopy(base_state_snapshot),
                     recent_turns=copy.deepcopy(recent_snapshot),
                     current_task=clone.get("task") or task,
-                    clone_name=clone.get("name"),
+                    clone_name=clone_name,
                     angle=clone.get("angle"),
                 )
+                self._progress(f"{clone_name} returned; saving turn")
                 output = validate_agent_output(role, raw_output, base_state_snapshot)
+                self._emit_agent_result(clone_name, output)
                 outputs.append(output)
 
                 run_state = increment_round(run_state)
@@ -423,7 +470,9 @@ class Router:
                 )
 
             if len(outputs) > 1:
+                self._progress(f"merging {len(outputs)} {role} clone output(s)")
                 merged = merge_clone_outputs(role, base_state_snapshot, outputs)
+                self._emit_agent_result("merger", merged)
                 run_state = increment_round(run_state)
                 self.storage.save_turn(
                     run_state["session_id"],
@@ -444,12 +493,14 @@ class Router:
                     updated["requires_user_intervention"] = True
                 self.storage.save_snapshot(updated["session_id"], updated)
                 self.storage.complete_clone_run(clone_group_id)
+                self._progress(f"{role} clone group completed")
                 return merged, updated
 
             updated = apply_state_patch(run_state, outputs[0].get("state_patch", {}))
             if role == "judge" and updated.get("judge_verdict") in {"KILL", "REDESIGN", "BUILD"}:
                 updated["requires_user_intervention"] = True
             self.storage.save_snapshot(updated["session_id"], updated)
+            self._progress(f"{role} completed")
             return outputs[0], updated
 
         except Exception as exc:
@@ -542,6 +593,7 @@ class Router:
         }
 
         try:
+            self._progress("start: asking Chair to generate the initial major question")
             raw_decision = self.llm.call_agent(
                 "chair",
                 state=state,
@@ -580,11 +632,176 @@ class Router:
             json.dumps(content, ensure_ascii=False, indent=2),
             metadata,
         )
+        if source == "chair":
+            self._emit_inline("chair", f"initial major question: {question}")
+        else:
+            self._emit_inline("chair", f"fallback initial major question: {question}")
         return state, source
 
     def _fallback_initial_major_question(self, idea: str) -> str:
         idea = self._clip_inline_text(idea.strip() or "这个想法", limit=80)
         return f"围绕「{idea}」，最需要先澄清的核心定义、适用边界和可证伪标准是什么？"
+
+    def _is_contextual_question(self, text: str) -> bool:
+        normalized = "".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        durable_markers = (
+            "我的约束是",
+            "我的目标是",
+            "我的想法是",
+            "我希望",
+            "我不想",
+            "我可以接受",
+            "我不能接受",
+            "场景是",
+            "补充一个约束",
+        )
+        question_markers = ("?", "？")
+        contextual_markers = (
+            "这是什么意思",
+            "什么意思",
+            "什么的方案",
+            "什么方案",
+            "指什么",
+            "具体指",
+            "这里的",
+            "上面",
+            "上一条",
+            "刚才",
+            "这段",
+            "其中",
+            "为什么",
+            "怎么理解",
+            "解释",
+            "展开",
+            "举例",
+            "说清楚",
+            "哪",
+        )
+        if any(marker in normalized for marker in contextual_markers):
+            return True
+        if any(marker in text for marker in question_markers):
+            return not any(marker in normalized for marker in durable_markers)
+        return False
+
+    def _answer_contextual_question(
+        self,
+        state: Dict[str, Any],
+        question: str,
+        recent_turns: List[Dict[str, Any]],
+    ) -> str:
+        fallback = self._fallback_contextual_answer(state, question, recent_turns)
+        if self.config.mock_llm or not self.config.openai_api_key:
+            return fallback
+
+        self._progress("answering contextual follow-up from recent turns")
+        payload = {
+            "state": {
+                "core_claim": state.get("core_claim", ""),
+                "current_major_question": state.get("current_major_question", ""),
+                "user_position": state.get("user_position", ""),
+                "strongest_attack": state.get("strongest_attack", ""),
+                "strongest_defense": state.get("strongest_defense", ""),
+                "best_redesign": state.get("best_redesign", ""),
+                "judge_verdict": state.get("judge_verdict", "undecided"),
+            },
+            "recent_turns": recent_turns[-8:],
+            "user_question": question,
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是 killme-lite 的上下文解释器，不是新的审议角色。"
+                    "用户正在追问最近某段输出是什么意思。"
+                    "只基于 state 和 recent_turns 回答，不要更新长期用户立场，不要给出新的裁决，"
+                    "不要把追问当成新需求。"
+                    "说明用户问的是哪个角色/哪段输出、这段话指的是什么、不指什么、下一步可怎么操作。"
+                    "只返回 JSON：{\"answer\":\"...\"}。"
+                ),
+            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
+        ]
+        try:
+            raw = self.llm.chat_completion(messages)
+            parsed = extract_json(raw)
+            if isinstance(parsed, dict):
+                answer = self._stringify_summary(parsed.get("answer"))
+                if answer:
+                    return answer
+        except Exception as exc:
+            self._progress(f"contextual follow-up fell back locally: {type(exc).__name__}: {exc}")
+        return fallback
+
+    def _fallback_contextual_answer(
+        self,
+        state: Dict[str, Any],
+        question: str,
+        recent_turns: List[Dict[str, Any]],
+    ) -> str:
+        target_turn = self._last_substantive_turn(recent_turns)
+        if not target_turn:
+            return (
+                "你这句是在追问上下文，但我没有找到可解释的上一条角色输出。"
+                "可以先运行 /summary 看当前状态，或指出你要问的是哪一段。"
+            )
+
+        parsed = self._parse_turn_content(target_turn.get("content", ""))
+        speaker = target_turn.get("speaker", "上一条输出")
+        role = parsed.get("role") if isinstance(parsed, dict) else ""
+        summary = self._summarize_result(parsed) if isinstance(parsed, dict) else ""
+        if not summary:
+            summary = self._clip_inline_text(str(target_turn.get("content", "")), limit=260)
+        if summary.startswith("strongest: "):
+            summary = summary.removeprefix("strongest: ")
+
+        display_role = role or speaker
+        if role == "builder" or "builder" in speaker.lower():
+            claim_context = " ".join(
+                [
+                    str(state.get("core_claim") or ""),
+                    str(state.get("current_major_question") or ""),
+                    summary,
+                ]
+            )
+            full_build = "完整客服 Agent" if "客服" in claim_context else "完整系统"
+            return (
+                "你问的是上一条 Builder 输出里的“方案”。这里的方案不是最终产品方案，"
+                "而是针对当前 major question 的最小验证/证伪方案。\n\n"
+                f"它要解决的上下文是：{state.get('current_major_question')}\n\n"
+                f"核心意思是：{summary}\n\n"
+                f"换句话说，Builder 不是说现在就做{full_build}，而是在建议先用更小的样本、"
+                "mock 或离线验证和明确指标判断这个方向是否值得继续。"
+            )
+
+        return (
+            f"你问的是上一条 {display_role} 输出。\n\n"
+            f"它对应的当前问题是：{state.get('current_major_question')}\n\n"
+            f"核心意思是：{summary}\n\n"
+            "这类追问只用于解释上下文，不会被当成新的长期用户约束。"
+        )
+
+    def _last_substantive_turn(self, turns: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        for turn in reversed(turns):
+            speaker = str(turn.get("speaker") or "").lower()
+            metadata = turn.get("metadata") or {}
+            if speaker in {"user", "system", "assistant"}:
+                continue
+            if metadata.get("type") == "chair_decision":
+                continue
+            return turn
+        for turn in reversed(turns):
+            speaker = str(turn.get("speaker") or "").lower()
+            if speaker not in {"user", "system", "assistant"}:
+                return turn
+        return None
+
+    def _parse_turn_content(self, content: str) -> Any:
+        try:
+            return json.loads(content or "")
+        except json.JSONDecodeError:
+            return {}
 
     def _clean_major_question(self, value: Any) -> str:
         if not isinstance(value, str):
@@ -747,6 +964,74 @@ Reason:
     def _save_state(self, state: Dict[str, Any]) -> None:
         state = ensure_shape(state)
         self.storage.save_snapshot(state["session_id"], state)
+
+    def _progress(self, message: str) -> None:
+        if self.progress is not None:
+            self.progress(f"[running] {message}")
+
+    def _emit_chair_decision(self, decision: Dict[str, Any]) -> None:
+        if self.progress is None:
+            return
+        decision_type = decision.get("decision_type") or "unknown"
+        role = decision.get("role_to_call") or "-"
+        clone_count = int(decision.get("clone_count") or 0)
+        target = role
+        if decision_type == "spawn_clones":
+            target = f"{role} x{clone_count}"
+        reason = self._clip_inline_text(str(decision.get("reason") or ""), limit=180)
+        suffix = f": {reason}" if reason else ""
+        self.progress(f"[chair] {decision_type} -> {target}{suffix}")
+
+    def _emit_agent_result(self, speaker: str, result: Dict[str, Any]) -> None:
+        if self.progress is None:
+            return
+        summary = self._summarize_result(result)
+        if summary:
+            self.progress(f"[{speaker}] {summary}")
+
+    def _emit_inline(self, speaker: str, message: str) -> None:
+        if self.progress is not None:
+            self.progress(f"[{speaker}] {self._clip_inline_text(message, limit=260)}")
+
+    def _summarize_result(self, result: Dict[str, Any]) -> str:
+        role = result.get("role") or "agent"
+        if role == "merger":
+            strongest = self._stringify_summary(result.get("strongest_point"))
+            if not strongest:
+                strongest = self._stringify_summary((result.get("merged_points") or [""])[0])
+            return f"strongest merged point: {self._clip_inline_text(strongest, limit=220)}"
+
+        if role == "judge":
+            verdict = result.get("verdict") or (result.get("state_patch") or {}).get("judge_verdict") or "undecided"
+            confidence = result.get("confidence") or "unknown"
+            reasoning = self._stringify_summary(result.get("reasoning_summary"))
+            reasoning = self._clip_inline_text(reasoning, limit=180)
+            return f"verdict: {verdict} ({confidence})" + (f"; {reasoning}" if reasoning else "")
+
+        strongest = (
+            result.get("strongest_attack")
+            or result.get("strongest_defense")
+            or result.get("best_redesign")
+            or result.get("strongest_point")
+            or ""
+        )
+        strongest = self._stringify_summary(strongest)
+        if not strongest:
+            return f"{role} returned"
+        return f"strongest: {self._clip_inline_text(strongest, limit=220)}"
+
+    def _stringify_summary(self, value: Any) -> str:
+        if isinstance(value, str):
+            return " ".join(value.split())
+        if isinstance(value, dict):
+            for key in ("claim", "proposal", "summary", "point", "text"):
+                text = value.get(key)
+                if isinstance(text, str) and text.strip():
+                    return " ".join(text.split())
+            return json.dumps(value, ensure_ascii=False)
+        if value is None:
+            return ""
+        return str(value)
 
     def _split_command(self, line: str) -> Tuple[str, str]:
         parts = line.strip().split(maxsplit=1)
