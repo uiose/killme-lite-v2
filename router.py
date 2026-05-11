@@ -1,0 +1,755 @@
+import copy
+import json
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from config import AppConfig, load_config
+from llm import LLMClient
+from merger import merge_clone_outputs
+from state import (
+    MAX_CLONE_LIMIT,
+    append_major_question_history,
+    apply_state_patch,
+    ensure_shape,
+    increment_round,
+    merge_user_position,
+    new_state,
+    pretty_state,
+    reset_for_next_major_question,
+)
+from storage import Storage
+from validation import (
+    VALID_ROLES,
+    normalize_role,
+    sanitize_clone_tasks,
+    validate_agent_output,
+    validate_chair_decision,
+)
+
+
+ROLE_COMMANDS = {
+    "/exec": "executioner",
+    "/defend": "defender",
+    "/build": "builder",
+    "/judge": "judge",
+}
+AUTO_MAX_STEPS = 3
+MAX_CONFIG_CLONES = MAX_CLONE_LIMIT
+
+
+class Router:
+    def __init__(
+        self,
+        base_dir: Path,
+        db_path: Optional[Path] = None,
+        config: Optional[AppConfig] = None,
+    ):
+        self.base_dir = Path(base_dir)
+        self.config = config or load_config(self.base_dir)
+        self.storage = Storage(db_path or self.config.db_path)
+        self.llm = LLMClient(base_dir=self.base_dir, config=self.config)
+
+    def handle_line(self, line: str) -> str:
+        if line.startswith("/"):
+            return self.handle_command(line)
+        return self.handle_user_message(line)
+
+    def handle_command(self, line: str) -> str:
+        command, arg = self._split_command(line)
+
+        if command == "/start":
+            return self.cmd_start(arg)
+
+        if command == "/auto":
+            return self.cmd_auto(arg)
+
+        if command == "/manual":
+            return self.cmd_manual()
+
+        if command in ROLE_COMMANDS:
+            return self.cmd_role(ROLE_COMMANDS[command])
+
+        if command == "/spawn":
+            return self.cmd_spawn(arg)
+
+        if command == "/state":
+            return self.cmd_state()
+
+        if command == "/summary":
+            return self.cmd_summary()
+
+        if command == "/checkpoint":
+            return self.cmd_checkpoint()
+
+        if command == "/config":
+            return self.cmd_config(arg)
+
+        if command == "/close":
+            return self.cmd_close(arg)
+
+        if command == "/reset":
+            self.storage.reset_all()
+            return "已重置本地 sessions、turns、state_snapshots、clone_runs。"
+
+        return f"未知命令：{command}"
+
+    def cmd_start(self, idea: str) -> str:
+        idea = idea.strip()
+        if not idea:
+            return "用法：/start <idea>"
+
+        state = new_state(self.base_dir, idea)
+        self.storage.create_session(state["session_id"], title=idea[:80])
+        self.storage.save_turn(state["session_id"], state["round"], "user", f"/start {idea}")
+        state, question_source = self._bootstrap_initial_major_question(state)
+        self.storage.save_snapshot(state["session_id"], state)
+
+        return (
+            f"已创建 session：{state['session_id']}\n"
+            f"Core claim：{state['core_claim']}\n"
+            f"Current major question：{state['current_major_question']}\n"
+            f"Question source：{question_source}\n"
+            f"建议下一步：/auto {AUTO_MAX_STEPS} 或 /exec"
+        )
+
+    def cmd_auto(self, arg: str) -> str:
+        state = self._require_state()
+        try:
+            steps = int(arg.strip() or "1")
+        except ValueError:
+            return f"用法：/auto <n>，例如 /auto {AUTO_MAX_STEPS}"
+
+        if steps < 1:
+            return "/auto 的步数必须 >= 1"
+
+        if steps > AUTO_MAX_STEPS:
+            return (
+                f"/auto 的 MVP 硬上限是 {AUTO_MAX_STEPS}。"
+                "这是有限推进按钮，不是让 agent 自己聊完的放飞按钮。"
+            )
+
+        state["chair_mode"] = "auto"
+        state["requires_user_intervention"] = False
+        self._save_state(state)
+
+        outputs: List[str] = []
+        for step in range(steps):
+            state = self._require_state()
+
+            # If the previous major question was closed, an explicit /auto means
+            # the user allows Chair to move into the pending next question.
+            if state.get("pending_next_question") and (
+                state.get("judge_verdict") != "undecided"
+                or self._current_major_question_is_closed(state)
+            ):
+                state = reset_for_next_major_question(state, state["pending_next_question"])
+                state = increment_round(state)
+                self.storage.save_turn(
+                    state["session_id"],
+                    state["round"],
+                    "chair",
+                    f"Advance to next major question: {state['current_major_question']}",
+                    {"auto_step": step + 1, "type": "advance_major_question"},
+                )
+                self.storage.save_snapshot(state["session_id"], state)
+
+            result = self._chair_step(auto_step=step + 1)
+            outputs.append(result)
+
+            latest = self._require_state()
+            if latest.get("requires_user_intervention"):
+                break
+
+        latest = self._require_state()
+        latest["chair_mode"] = "manual"
+        self._save_state(latest)
+        outputs.append("Auto run stopped. 当前已回到 manual mode，等待用户。")
+        return "\n\n---\n\n".join(outputs)
+
+    def cmd_manual(self) -> str:
+        state = self._require_state()
+        state["chair_mode"] = "manual"
+        state["requires_user_intervention"] = True
+        self._save_state(state)
+        return "已切换到 manual mode。Chair 不会擅自连续推进。"
+
+    def cmd_role(self, role: str) -> str:
+        result, updated = self._run_role(
+            role,
+            task=f"Manual command: call one {role}",
+            clone_tasks=None,
+        )
+        updated["chair_mode"] = "manual"
+        updated["requires_user_intervention"] = True
+        self._save_state(updated)
+        return self._format_agent_result(result)
+
+    def cmd_spawn(self, arg: str) -> str:
+        state = self._require_state()
+        parts = arg.split()
+        if len(parts) != 2:
+            return "用法：/spawn <executioner|defender|builder|judge> <count>"
+
+        role = normalize_role(parts[0])
+        if role not in VALID_ROLES:
+            return "role 必须是 executioner、defender、builder 或 judge"
+
+        try:
+            count = int(parts[1])
+        except ValueError:
+            return "count 必须是整数"
+
+        if count < 1:
+            return "count 必须 >= 1"
+
+        limit = int((state.get("clone_limits") or {}).get(role, 1))
+        if count > limit:
+            return f"{role} 当前 clone 上限是 {limit}。请先用 /config {role} {count} 调整上限。"
+
+        clone_tasks = self._default_clone_tasks(role, count)
+        result, updated = self._run_role(
+            role,
+            task=f"Manual command: spawn {count} {role} clone(s)",
+            clone_tasks=clone_tasks,
+        )
+        updated["chair_mode"] = "manual"
+        updated["requires_user_intervention"] = True
+        self._save_state(updated)
+        return self._format_agent_result(result)
+
+    def cmd_state(self) -> str:
+        state = self._require_state()
+        return pretty_state(state)
+
+    def cmd_summary(self) -> str:
+        state = self._require_state()
+        return self._format_summary(state)
+
+    def cmd_checkpoint(self) -> str:
+        state = self._require_state()
+        state = increment_round(state)
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "user",
+            "/checkpoint",
+            {"command": "checkpoint"},
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        return "已保存 checkpoint。\n\n" + self._format_summary(state)
+
+    def cmd_config(self, arg: str) -> str:
+        state = self._require_state()
+        parts = arg.split()
+        if len(parts) != 2:
+            return "用法：/config <executioner|defender|builder|judge> <max_clones>"
+
+        role, raw_limit = parts
+        role = normalize_role(role)
+        if role not in VALID_ROLES:
+            return "role 必须是 executioner、defender、builder 或 judge"
+
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            return "max_clones 必须是整数"
+
+        if limit < 1:
+            return "max_clones 必须 >= 1"
+        if limit > MAX_CONFIG_CLONES:
+            return f"第一版 max_clones 上限是 {MAX_CONFIG_CLONES}，防止成本和噪音失控。"
+
+        state["clone_limits"][role] = limit
+        state = increment_round(state)
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "user",
+            f"/config {role} {limit}",
+            {"command": "config", "role": role, "limit": limit},
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        return f"已设置 clone_limits.{role} = {limit}"
+
+    def cmd_close(self, arg: str = "") -> str:
+        option = arg.strip()
+        if option and option != "--force":
+            return "用法：/close 或 /close --force"
+
+        force = option == "--force"
+        state = self._require_state()
+        if self._needs_judge_before_close(state) and not force:
+            return self._close_refusal_message()
+
+        closing, updated = self._close_question(state, force=force)
+        updated["chair_mode"] = "manual"
+        updated["requires_user_intervention"] = True
+        self._save_state(updated)
+        return closing
+
+    def handle_user_message(self, text: str) -> str:
+        state = self._require_state()
+        state = increment_round(state)
+        previous_position = state.get("user_position", "")
+        state["user_position"] = merge_user_position(previous_position, text.strip())
+        state["requires_user_intervention"] = False
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "user",
+            text.strip(),
+            {"previous_user_position": previous_position, "updated_user_position": state["user_position"]},
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        return "已合并用户输入到 user_position，而不是覆盖旧约束。可继续 /auto 3、/exec、/spawn、/defend、/build、/judge、/summary 或 /close。"
+
+    def _chair_step(self, auto_step: int) -> str:
+        state = self._require_state()
+        recent = self.storage.recent_turns(state["session_id"], limit=8)
+        raw_decision = self.llm.call_agent(
+            "chair",
+            state=state,
+            recent_turns=recent,
+            current_task="Decide next deliberation step.",
+        )
+        decision = validate_chair_decision(raw_decision, state)
+
+        state = increment_round(state)
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "chair",
+            json.dumps(decision, ensure_ascii=False, indent=2),
+            {"auto_step": auto_step, "type": "chair_decision"},
+        )
+        state = apply_state_patch(state, decision.get("state_patch", {}))
+        self.storage.save_snapshot(state["session_id"], state)
+
+        decision_type = decision["decision_type"]
+        if decision_type == "wait_user":
+            state["requires_user_intervention"] = True
+            self._save_state(state)
+            return self._format_chair_decision(decision)
+
+        if decision_type in {"call_role", "judge"}:
+            role = decision.get("role_to_call") or ("judge" if decision_type == "judge" else None)
+            if role not in VALID_ROLES:
+                return f"Chair 决策无效：role_to_call={role}"
+            result, _ = self._run_role(role, task=decision.get("message_to_user") or decision.get("reason") or "")
+            return self._format_chair_decision(decision) + "\n\n" + self._format_agent_result(result)
+
+        if decision_type == "spawn_clones":
+            role = decision.get("role_to_call")
+            if role not in VALID_ROLES:
+                return f"Chair 决策无效：role_to_call={role}"
+            limit = int(state.get("clone_limits", {}).get(role, 1))
+            requested = int(decision.get("clone_count") or 1)
+            count = max(1, min(requested, limit))
+            clone_tasks = sanitize_clone_tasks(
+                decision.get("clone_tasks") or self._default_clone_tasks(role, count),
+                role,
+                count,
+            )
+            result, _ = self._run_role(role, task=decision.get("reason") or "", clone_tasks=clone_tasks)
+            return self._format_chair_decision(decision) + "\n\n" + self._format_agent_result(result)
+
+        if decision_type == "close_question":
+            if self._needs_judge_before_close(state):
+                state["requires_user_intervention"] = True
+                self._save_state(state)
+                return self._close_refusal_message()
+            closing, _ = self._close_question(state, existing_decision=decision)
+            return closing
+
+        return f"Chair decision_type 未实现：{decision_type}\n{json.dumps(decision, ensure_ascii=False, indent=2)}"
+
+    def _run_role(
+        self,
+        role: str,
+        task: str,
+        clone_tasks: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        base_state = self._require_state()
+        base_state_snapshot = ensure_shape(copy.deepcopy(base_state))
+        recent_snapshot = self.storage.recent_turns(base_state_snapshot["session_id"], limit=8)
+
+        if clone_tasks is None:
+            clone_tasks = [{"name": role, "angle": "single instance", "task": task}]
+        clone_tasks = sanitize_clone_tasks(clone_tasks, role, len(clone_tasks))
+        clone_group_id = ""
+        if len(clone_tasks) > 1:
+            clone_group_id = f"{role}-{base_state_snapshot.get('round', 0) + 1}-{uuid.uuid4().hex[:8]}"
+            self.storage.start_clone_run(
+                clone_group_id,
+                base_state_snapshot["session_id"],
+                role,
+            )
+
+        outputs: List[Dict[str, Any]] = []
+        run_state = ensure_shape(copy.deepcopy(base_state_snapshot))
+
+        try:
+            for clone in clone_tasks:
+                # All clones receive the same state and recent-turn snapshot. No clone
+                # sees state patches or turns produced by siblings in this batch.
+                raw_output = self.llm.call_agent(
+                    role,
+                    state=copy.deepcopy(base_state_snapshot),
+                    recent_turns=copy.deepcopy(recent_snapshot),
+                    current_task=clone.get("task") or task,
+                    clone_name=clone.get("name"),
+                    angle=clone.get("angle"),
+                )
+                output = validate_agent_output(role, raw_output, base_state_snapshot)
+                outputs.append(output)
+
+                run_state = increment_round(run_state)
+                self.storage.save_turn(
+                    run_state["session_id"],
+                    run_state["round"],
+                    clone.get("name") or role,
+                    json.dumps(output, ensure_ascii=False, indent=2),
+                    {
+                        "role": role,
+                        "angle": clone.get("angle"),
+                        "clone_group_id": clone_group_id or None,
+                        "clone_independent": len(clone_tasks) > 1,
+                        "independent_snapshot": len(clone_tasks) > 1,
+                        "input_state_round": base_state_snapshot.get("round"),
+                        "state_snapshot_round": base_state_snapshot.get("round"),
+                        "state_patch_applied": len(clone_tasks) == 1,
+                    },
+                )
+
+            if len(outputs) > 1:
+                merged = merge_clone_outputs(role, base_state_snapshot, outputs)
+                run_state = increment_round(run_state)
+                self.storage.save_turn(
+                    run_state["session_id"],
+                    run_state["round"],
+                    "merger",
+                    json.dumps(merged, ensure_ascii=False, indent=2),
+                    {
+                        "source_role": role,
+                        "clone_group_id": clone_group_id,
+                        "merged_after_independent_clones": True,
+                        "merged_independent_clones": True,
+                        "input_state_round": base_state_snapshot.get("round"),
+                        "state_snapshot_round": base_state_snapshot.get("round"),
+                    },
+                )
+                updated = apply_state_patch(run_state, merged.get("state_patch", {}))
+                if role == "judge" and updated.get("judge_verdict") in {"KILL", "REDESIGN", "BUILD"}:
+                    updated["requires_user_intervention"] = True
+                self.storage.save_snapshot(updated["session_id"], updated)
+                self.storage.complete_clone_run(clone_group_id)
+                return merged, updated
+
+            updated = apply_state_patch(run_state, outputs[0].get("state_patch", {}))
+            if role == "judge" and updated.get("judge_verdict") in {"KILL", "REDESIGN", "BUILD"}:
+                updated["requires_user_intervention"] = True
+            self.storage.save_snapshot(updated["session_id"], updated)
+            return outputs[0], updated
+
+        except Exception as exc:
+            if clone_group_id:
+                error = f"{type(exc).__name__}: {exc}"
+                self.storage.fail_clone_run(clone_group_id, error)
+                run_state = increment_round(run_state)
+                self.storage.save_turn(
+                    run_state["session_id"],
+                    run_state["round"],
+                    "system",
+                    f"clone_group_failed: {error}",
+                    {
+                        "clone_group_id": clone_group_id,
+                        "role": role,
+                        "status": "failed",
+                        "error": error,
+                        "outputs_completed": len(outputs),
+                    },
+                )
+                self.storage.save_snapshot(run_state["session_id"], run_state)
+            raise
+
+    def _close_question(
+        self,
+        state: Dict[str, Any],
+        existing_decision: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+    ) -> Tuple[str, Dict[str, Any]]:
+        state = ensure_shape(state)
+        major_question = state.get("current_major_question", "")
+        closed_without_judgement = self._needs_judge_before_close(state) and force
+        recent = self.storage.recent_turns(state["session_id"], limit=8)
+
+        if existing_decision is None:
+            raw_decision = self.llm.call_agent(
+                "chair",
+                state=state,
+                recent_turns=recent,
+                current_task="Produce closing statement for current major question.",
+            )
+            decision = validate_chair_decision(raw_decision, state)
+        else:
+            decision = validate_chair_decision(existing_decision, state)
+
+        closing = decision.get("closing_statement") or self._fallback_closing_statement(state)
+        if closed_without_judgement and "closed_without_judgement: true" not in closing:
+            closing = closing.rstrip() + "\n\nclosed_without_judgement: true"
+
+        state = increment_round(state)
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "chair",
+            closing,
+            {
+                "type": "closing_statement",
+                "closed_without_judgement": closed_without_judgement,
+            },
+        )
+        state = apply_state_patch(state, decision.get("state_patch", {}))
+        state["requires_user_intervention"] = True
+        state = append_major_question_history(
+            state,
+            major_question=major_question,
+            closing_statement=closing,
+            closed_without_judgement=closed_without_judgement,
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        return closing, state
+
+    def _needs_judge_before_close(self, state: Dict[str, Any]) -> bool:
+        return ensure_shape(state).get("judge_verdict") == "undecided"
+
+    def _bootstrap_initial_major_question(self, state: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+        task = (
+            "Bootstrap initial major question for a new session. "
+            "Generate exactly one topic-specific current_major_question from state.core_claim. "
+            "Do not call any role, do not attack, defend, judge, or close. "
+            "The question must clarify definitions, boundaries, success/failure criteria, "
+            "or the smallest falsifiable scenario."
+        )
+        fallback_question = self._fallback_initial_major_question(state.get("core_claim", ""))
+        question = fallback_question
+        source = "fallback"
+        metadata: Dict[str, Any] = {"type": "initial_major_question", "source": source}
+        content: Dict[str, Any] = {
+            "current_major_question": question,
+            "reason": "fallback_initial_major_question",
+        }
+
+        try:
+            raw_decision = self.llm.call_agent(
+                "chair",
+                state=state,
+                recent_turns=self.storage.recent_turns(state["session_id"], limit=4),
+                current_task=task,
+            )
+            decision = validate_chair_decision(raw_decision, state)
+            candidate = self._clean_major_question(
+                (decision.get("state_patch") or {}).get("current_major_question")
+            )
+            if candidate:
+                question = candidate
+                source = "chair"
+                metadata = {
+                    "type": "initial_major_question",
+                    "source": source,
+                    "validation_warnings": decision.get("validation_warnings") or [],
+                }
+                content = {
+                    "current_major_question": question,
+                    "reason": decision.get("reason") or "",
+                    "message_to_user": decision.get("message_to_user") or "",
+                }
+            else:
+                metadata["reason"] = "chair_returned_no_current_major_question"
+        except Exception as exc:
+            metadata["error"] = f"{type(exc).__name__}: {exc}"
+
+        state["current_major_question"] = question
+        state["requires_user_intervention"] = False
+        state = increment_round(state)
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "chair",
+            json.dumps(content, ensure_ascii=False, indent=2),
+            metadata,
+        )
+        return state, source
+
+    def _fallback_initial_major_question(self, idea: str) -> str:
+        idea = self._clip_inline_text(idea.strip() or "这个想法", limit=80)
+        return f"围绕「{idea}」，最需要先澄清的核心定义、适用边界和可证伪标准是什么？"
+
+    def _clean_major_question(self, value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        question = " ".join(value.strip().split())
+        if len(question) < 8:
+            return ""
+        question = self._clip_inline_text(question, limit=260)
+        if not question.endswith(("?", "？")):
+            question += "？"
+        return question
+
+    def _clip_inline_text(self, value: str, limit: int) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    def _current_major_question_is_closed(self, state: Dict[str, Any]) -> bool:
+        state = ensure_shape(state)
+        history = state.get("major_question_history") or []
+        if not history:
+            return False
+        return history[-1].get("major_question") == state.get("current_major_question")
+
+    def _close_refusal_message(self) -> str:
+        return "当前 Judge 还未裁决。请先运行 /judge，或使用 /close --force 强制关闭。"
+
+    def _fallback_closing_statement(self, state: Dict[str, Any]) -> str:
+        return f"""## Chair closing statement
+
+Major question:
+{state.get('current_major_question', '')}
+
+What survived:
+{'; '.join(state.get('surviving_arguments') or ['尚未形成明确幸存观点。'])}
+
+What was killed:
+{'; '.join(state.get('killed_arguments') or ['尚未形成明确淘汰观点。'])}
+
+Main unresolved tension:
+{state.get('strongest_attack', '')}
+
+Current state update:
+- Core claim: {state.get('core_claim', '')}
+- User position: {state.get('user_position', '')}
+- Strongest attack: {state.get('strongest_attack', '')}
+- Strongest defense: {state.get('strongest_defense', '')}
+- Best redesign: {state.get('best_redesign', '')}
+- Judge verdict: {state.get('judge_verdict', 'undecided')}
+
+Next major question:
+{state.get('pending_next_question') or '下一步最值得验证的问题是什么？'}
+
+Mode recommendation:
+MANUAL
+
+Reason:
+需要用户确认下一问题或补充真实约束。"""
+
+    def _format_summary(self, state: Dict[str, Any]) -> str:
+        history_count = len(state.get("major_question_history") or [])
+        open_questions = state.get("open_questions") or []
+        last_open = open_questions[-3:] if open_questions else ["暂无"]
+        return (
+            "## Session summary\n"
+            f"- session_id: {state.get('session_id')}\n"
+            f"- round: {state.get('round')}\n"
+            f"- mode: {state.get('chair_mode')}\n"
+            f"- core_claim: {state.get('core_claim')}\n"
+            f"- current_major_question: {state.get('current_major_question')}\n"
+            f"- user_position: {state.get('user_position')}\n"
+            f"- strongest_attack: {state.get('strongest_attack') or '暂无'}\n"
+            f"- strongest_defense: {state.get('strongest_defense') or '暂无'}\n"
+            f"- best_redesign: {state.get('best_redesign') or '暂无'}\n"
+            f"- judge_verdict: {state.get('judge_verdict')}\n"
+            f"- pending_next_question: {state.get('pending_next_question') or '暂无'}\n"
+            f"- major_question_history_count: {history_count}\n"
+            f"- recent_open_questions: {json.dumps(last_open, ensure_ascii=False)}\n"
+            "- useful_commands: /auto 3, /exec, /spawn <role> <n>, /defend, /build, /judge, /close, /close --force"
+        )
+
+    def _format_chair_decision(self, decision: Dict[str, Any]) -> str:
+        warnings = decision.get("validation_warnings") or []
+        warning_text = f"\n- validation_warnings: {warnings}" if warnings else ""
+        return (
+            "### Chair decision\n"
+            f"- decision_type: {decision.get('decision_type')}\n"
+            f"- role_to_call: {decision.get('role_to_call')}\n"
+            f"- clone_count: {decision.get('clone_count')}\n"
+            f"- reason: {decision.get('reason')}\n"
+            f"- message: {decision.get('message_to_user')}"
+            f"{warning_text}"
+        )
+
+    def _format_agent_result(self, result: Dict[str, Any]) -> str:
+        role = result.get("role", "agent")
+        if role == "merger":
+            return (
+                "### Merger result\n"
+                f"- source_role: {result.get('source_role')}\n"
+                "- clone_input: same frozen state + recent turns snapshot\n"
+                f"- strongest_point: {result.get('strongest_point')}\n"
+                f"- merged_points: {json.dumps(result.get('merged_points', []), ensure_ascii=False, indent=2)}"
+            )
+
+        if role == "judge":
+            return (
+                "### Judge result\n"
+                f"- verdict: {result.get('verdict')}\n"
+                f"- confidence: {result.get('confidence')}\n"
+                f"- reasoning: {result.get('reasoning_summary')}\n"
+                f"- next_validation_action: {result.get('next_validation_action')}"
+            )
+
+        strongest = (
+            result.get("strongest_attack")
+            or result.get("strongest_defense")
+            or result.get("best_redesign")
+            or result.get("strongest_point")
+            or ""
+        )
+        return f"### {role} result\n- strongest: {strongest}"
+
+    def _default_clone_tasks(self, role: str, count: int) -> List[Dict[str, str]]:
+        angles = {
+            "executioner": [
+                "attack definition ambiguity",
+                "attack evidence gap",
+                "attack execution complexity",
+            ],
+            "defender": [
+                "defend from user value",
+                "defend from minimal MVP feasibility",
+            ],
+            "builder": [
+                "design the lightest MVP",
+                "design the smallest falsifiable test",
+            ],
+            "judge": [
+                "judge product value",
+                "judge implementation complexity",
+            ],
+        }.get(role, ["single instance"])
+        return [
+            {
+                "name": f"{role.capitalize()}-{i + 1}",
+                "angle": angles[i % len(angles)],
+                "task": f"Evaluate current major question from angle: {angles[i % len(angles)]}",
+            }
+            for i in range(count)
+        ]
+
+    def _require_state(self) -> Dict[str, Any]:
+        state = self.storage.load_latest_state()
+        if state is None:
+            raise RuntimeError("没有 active session。请先运行 /start <idea>")
+        return ensure_shape(state)
+
+    def _save_state(self, state: Dict[str, Any]) -> None:
+        state = ensure_shape(state)
+        self.storage.save_snapshot(state["session_id"], state)
+
+    def _split_command(self, line: str) -> Tuple[str, str]:
+        parts = line.strip().split(maxsplit=1)
+        command = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+        return command, arg
