@@ -347,6 +347,10 @@ KILLME_JSON_RESPONSE_FORMAT=0 uv run python main.py
 /build
 /judge
 /spawn <executioner|defender|builder|judge> <count>
+/sessions [limit]
+/use <session_id>
+/export [session_id]
+/export-all
 /state
 /summary
 /checkpoint
@@ -364,6 +368,10 @@ KILLME_JSON_RESPONSE_FORMAT=0 uv run python main.py
 - `/manual` 切回人工模式；
 - `/exec`、`/defend`、`/build`、`/judge` 是单实例调用；
 - `/spawn` 是显式 clone 命令，并严格遵守 `clone_limits`；
+- `/sessions [limit]` 列出历史 session，并标记当前 active session；
+- `/use <session_id>` 切换当前 active session；
+- `/export [session_id]` 导出单个 session，默认导出 active session；
+- `/export-all` 导出全部 sessions；
 - `/state` 输出当前 shared state；
 - `/summary` 输出当前 session 摘要；
 - `/checkpoint` 保存当前 state snapshot；

@@ -75,6 +75,18 @@ class Router:
         if command == "/spawn":
             return self.cmd_spawn(arg)
 
+        if command == "/sessions":
+            return self.cmd_sessions(arg)
+
+        if command == "/use":
+            return self.cmd_use(arg)
+
+        if command == "/export":
+            return self.cmd_export(arg)
+
+        if command == "/export-all":
+            return self.cmd_export_all()
+
         if command == "/state":
             return self.cmd_state()
 
@@ -103,6 +115,7 @@ class Router:
 
         state = new_state(self.base_dir, idea)
         self.storage.create_session(state["session_id"], title=idea[:80])
+        self.storage.set_active_session_id(state["session_id"])
         self.storage.save_turn(state["session_id"], state["round"], "user", f"/start {idea}")
         state, question_source = self._bootstrap_initial_major_question(state)
         self.storage.save_snapshot(state["session_id"], state)
@@ -224,6 +237,60 @@ class Router:
         state = self._require_state()
         return pretty_state(state)
 
+    def cmd_sessions(self, arg: str = "") -> str:
+        raw_limit = arg.strip()
+        if raw_limit:
+            try:
+                limit = int(raw_limit)
+            except ValueError:
+                return "用法：/sessions [limit]"
+        else:
+            limit = 20
+        if limit < 1:
+            return "limit 必须 >= 1"
+        limit = min(limit, 100)
+
+        sessions = self.storage.list_sessions(limit)
+        if not sessions:
+            return "暂无 sessions。请先运行 /start <idea>。"
+
+        active_session_id = self._active_session_id()
+        lines = [
+            "## Sessions",
+            f"- active_session_id: {active_session_id or '暂无'}",
+            f"- shown: {len(sessions)}",
+            "",
+            "| active | session_id | round | turns | clone_runs | updated_at | title |",
+            "|---|---|---:|---:|---:|---|---|",
+        ]
+        for session in sessions:
+            marker = "*" if session["session_id"] == active_session_id else ""
+            lines.append(
+                "| {active} | {session_id} | {round} | {turns} | {clones} | {updated_at} | {title} |".format(
+                    active=marker,
+                    session_id=session["session_id"],
+                    round=session.get("latest_round", 0),
+                    turns=session.get("turn_count", 0),
+                    clones=session.get("clone_run_count", 0),
+                    updated_at=session.get("updated_at", ""),
+                    title=self._escape_table_cell(str(session.get("title") or "")),
+                )
+            )
+        return "\n".join(lines)
+
+    def cmd_use(self, arg: str) -> str:
+        session_id = arg.strip()
+        if not session_id:
+            return "用法：/use <session_id>"
+        if not self.storage.session_exists(session_id):
+            return f"未找到 session：{session_id}"
+
+        self.storage.set_active_session_id(session_id)
+        state = self.storage.load_latest_state(session_id)
+        if state is None:
+            return f"已切换 active session：{session_id}\n但该 session 暂无 state snapshot。"
+        return f"已切换 active session：{session_id}\n\n" + self._format_summary(ensure_shape(state))
+
     def cmd_summary(self) -> str:
         state = self._require_state()
         return self._format_summary(state)
@@ -240,6 +307,30 @@ class Router:
         )
         self.storage.save_snapshot(state["session_id"], state)
         return "已保存 checkpoint。\n\n" + self._format_summary(state)
+
+    def cmd_export(self, arg: str = "") -> str:
+        session_id = arg.strip() or self._active_session_id()
+        if not session_id:
+            return "没有 active session 可导出。请先运行 /start <idea> 或 /use <session_id>。"
+        if not self.storage.session_exists(session_id):
+            return f"未找到 session：{session_id}"
+
+        json_path, markdown_path = self._export_session(session_id)
+        return (
+            f"已导出 session：{session_id}\n"
+            f"- JSON: {json_path}\n"
+            f"- Markdown: {markdown_path}"
+        )
+
+    def cmd_export_all(self) -> str:
+        session_ids = self.storage.all_session_ids()
+        if not session_ids:
+            return "暂无 sessions 可导出。"
+
+        for session_id in session_ids:
+            self._export_session(session_id)
+        export_dir = self.base_dir / "exports"
+        return f"已导出 {len(session_ids)} 个 session 到：{export_dir}"
 
     def cmd_config(self, arg: str) -> str:
         state = self._require_state()
@@ -803,6 +894,123 @@ class Router:
         except json.JSONDecodeError:
             return {}
 
+    def _export_session(self, session_id: str) -> Tuple[Path, Path]:
+        data = self.storage.export_session_data(session_id)
+        export_dir = self.base_dir / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        json_path = export_dir / f"{session_id}.json"
+        markdown_path = export_dir / f"{session_id}.md"
+        json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        markdown_path.write_text(self._format_export_markdown(data), encoding="utf-8")
+        return json_path, markdown_path
+
+    def _format_export_markdown(self, data: Dict[str, Any]) -> str:
+        session = data.get("session") or {}
+        state = data.get("latest_state") or {}
+        history = state.get("major_question_history") or []
+        turns = data.get("turns") or []
+        clone_runs = data.get("clone_runs") or []
+
+        lines = [
+            f"# killme-lite session export: {session.get('session_id', '')}",
+            "",
+            "## Session",
+            "",
+            f"- title: {session.get('title', '')}",
+            f"- session_id: {session.get('session_id', '')}",
+            f"- created_at: {session.get('created_at', '')}",
+            f"- updated_at: {session.get('updated_at', '')}",
+            f"- closed_at: {session.get('closed_at') or 'null'}",
+            f"- exported_at: {data.get('exported_at', '')}",
+            "",
+            "## Latest State",
+            "",
+            f"- round: {state.get('round', 0)}",
+            f"- core_claim: {state.get('core_claim', '')}",
+            f"- current_major_question: {state.get('current_major_question', '')}",
+            f"- user_position: {state.get('user_position', '')}",
+            f"- strongest_attack: {state.get('strongest_attack') or '暂无'}",
+            f"- strongest_defense: {state.get('strongest_defense') or '暂无'}",
+            f"- best_redesign: {state.get('best_redesign') or '暂无'}",
+            f"- judge_verdict: {state.get('judge_verdict', 'undecided')}",
+            f"- pending_next_question: {state.get('pending_next_question') or '暂无'}",
+            "",
+            "## Major Question History",
+            "",
+        ]
+
+        if history:
+            for index, item in enumerate(history, start=1):
+                lines.extend(
+                    [
+                        f"### {index}. {item.get('major_question', '')}",
+                        "",
+                        f"- round: {item.get('round', item.get('round_closed', ''))}",
+                        f"- judge_verdict: {item.get('judge_verdict', '')}",
+                        f"- next_major_question: {item.get('next_major_question') or '暂无'}",
+                        f"- closed_without_judgement: {item.get('closed_without_judgement', False)}",
+                        "",
+                        "Closing statement:",
+                        "",
+                        self._markdown_block(item.get("closing_statement", "")),
+                        "",
+                    ]
+                )
+        else:
+            lines.extend(["暂无", ""])
+
+        lines.extend(["## Turns", ""])
+        if turns:
+            for turn in turns:
+                lines.extend(
+                    [
+                        f"### Round {turn.get('round')} - {turn.get('speaker')}",
+                        "",
+                        f"- id: {turn.get('id')}",
+                        f"- created_at: {turn.get('created_at')}",
+                        "",
+                    ]
+                )
+                metadata = turn.get("metadata") or {}
+                if metadata:
+                    lines.extend(["Metadata:", "", self._json_block(metadata), ""])
+                lines.extend(["Content:", "", self._markdown_block(turn.get("content", "")), ""])
+        else:
+            lines.extend(["暂无", ""])
+
+        lines.extend(["## Clone Runs", ""])
+        if clone_runs:
+            lines.extend(
+                [
+                    "| clone_group_id | role | status | started_at | completed_at | error |",
+                    "|---|---|---|---|---|---|",
+                ]
+            )
+            for run in clone_runs:
+                lines.append(
+                    "| {group} | {role} | {status} | {started} | {completed} | {error} |".format(
+                        group=self._escape_table_cell(str(run.get("clone_group_id", ""))),
+                        role=self._escape_table_cell(str(run.get("role", ""))),
+                        status=self._escape_table_cell(str(run.get("status", ""))),
+                        started=self._escape_table_cell(str(run.get("started_at", ""))),
+                        completed=self._escape_table_cell(str(run.get("completed_at") or "")),
+                        error=self._escape_table_cell(str(run.get("error") or "")),
+                    )
+                )
+        else:
+            lines.append("暂无")
+
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _json_block(self, value: Any) -> str:
+        return "~~~json\n" + json.dumps(value, ensure_ascii=False, indent=2) + "\n~~~"
+
+    def _markdown_block(self, value: Any) -> str:
+        return "~~~text\n" + str(value or "") + "\n~~~"
+
+    def _escape_table_cell(self, value: str) -> str:
+        return " ".join(str(value or "").replace("|", "\\|").split())
+
     def _clean_major_question(self, value: Any) -> str:
         if not isinstance(value, str):
             return ""
@@ -956,10 +1164,13 @@ Reason:
         ]
 
     def _require_state(self) -> Dict[str, Any]:
-        state = self.storage.load_latest_state()
+        state = self.storage.load_latest_state(self._active_session_id())
         if state is None:
             raise RuntimeError("没有 active session。请先运行 /start <idea>")
         return ensure_shape(state)
+
+    def _active_session_id(self) -> Optional[str]:
+        return self.storage.get_active_session_id() or self.storage.latest_session_id()
 
     def _save_state(self, state: Dict[str, Any]) -> None:
         state = ensure_shape(state)

@@ -333,21 +333,90 @@ uv run python main.py --init-db
 
 ---
 
-## 8. 常用运行方式
+## 8. 会话管理与导出
 
-### 8.1 交互式 REPL
+列出最近 sessions：
+
+```text
+/sessions
+```
+
+限制显示数量：
+
+```text
+/sessions 50
+```
+
+输出中的 `*` 表示当前 active session。普通命令如 `/summary`、`/auto`、`/state` 都默认作用于 active session。
+
+切换 active session：
+
+```text
+/use session-xxxxxxxxxxxx
+```
+
+`/use` 需要完整 `session_id`，不支持前缀匹配。
+
+导出当前 active session：
+
+```text
+/export
+```
+
+导出指定 session：
+
+```text
+/export session-xxxxxxxxxxxx
+```
+
+导出全部 sessions：
+
+```text
+/export-all
+```
+
+导出文件写入：
+
+```text
+exports/<session_id>.json
+exports/<session_id>.md
+```
+
+JSON 是权威备份格式，结构为：
+
+```json
+{
+  "schema_version": 1,
+  "exported_at": "...",
+  "session": {},
+  "latest_state": {},
+  "turns": [],
+  "state_snapshots": [],
+  "clone_runs": []
+}
+```
+
+Markdown 是阅读副本，包含 session 元信息、latest state 摘要、major question history、完整 turns 和 clone run 状态。
+
+注意：导出内容可能包含用户输入、LLM 输出和本地审议记录。`exports/` 已被 `.gitignore` 忽略，不要把真实导出内容提交到公开仓库。
+
+---
+
+## 9. 常用运行方式
+
+### 9.1 交互式 REPL
 
 ```powershell
 uv run python main.py
 ```
 
-### 8.2 指定数据库
+### 9.2 指定数据库
 
 ```powershell
 uv run python main.py --db ./data/dev.sqlite
 ```
 
-### 8.3 脚本模式
+### 9.3 脚本模式
 
 创建 `smoke.txt`：
 
@@ -365,7 +434,7 @@ uv run python main.py --db ./data/dev.sqlite
 uv run python main.py --script .\smoke.txt
 ```
 
-### 8.4 真实 LLM 小步 smoke test
+### 9.4 真实 LLM 小步 smoke test
 
 ```powershell
 $env:KILLME_MOCK_LLM="0"
@@ -384,9 +453,9 @@ uv run python main.py --db ./data/real-llm-smoke.sqlite
 
 ---
 
-## 9. 常用命令流程
+## 10. 常用命令流程
 
-### 9.1 命令说明
+### 10.1 命令说明
 
 | 命令 | 作用 | 何时使用 |
 |---|---|---|
@@ -399,6 +468,10 @@ uv run python main.py --db ./data/real-llm-smoke.sqlite
 | `/judge` | 手动调用一次 Judge | 攻击、防守或改法已经足够，需要阶段性裁决 |
 | `/spawn <role> <count>` | 显式生成某个角色的多个 clones，并由 Merger 合并 | 你想并行检查多个独立角度，例如多个失败面 |
 | `/config <role> <max_clones>` | 设置某个非 Chair 角色的 clone 上限 | 你想增加或降低 clone 数量，控制成本和噪音 |
+| `/sessions [limit]` | 列出历史 sessions，并标记 active session | 你想查看或切换过往会话 |
+| `/use <session_id>` | 切换当前 active session | 你想回到某个历史 session 继续审议 |
+| `/export [session_id]` | 导出一个 session 的 JSON 和 Markdown | 你想备份或分享当前/指定会话 |
+| `/export-all` | 导出全部 sessions | 你想一次性备份本地所有会话 |
 | `/state` | 输出当前 shared state JSON | 你想检查系统当前记住了什么 |
 | `/summary` | 输出当前 session 的简洁摘要 | 你想快速了解当前进度和下一步 |
 | `/checkpoint` | 保存当前 state snapshot，并输出摘要 | 重要节点前后想手动留档 |
@@ -471,7 +544,7 @@ closed_without_judgement: true
 
 这适合你明确知道当前问题暂时不值得继续，但它不是推荐的常规路径。
 
-### 9.2 推荐流程
+### 10.2 推荐流程
 
 最短流程：
 
@@ -533,7 +606,7 @@ closed_without_judgement: true
 
 ---
 
-## 10. 测试与质量检查
+## 11. 测试与质量检查
 
 安装开发依赖：
 
@@ -568,7 +641,7 @@ uv sync --no-dev
 
 ---
 
-## 11. 排错
+## 12. 排错
 
 ### `uv sync --dev` 下载失败
 
@@ -659,7 +732,7 @@ uv run python main.py --db ./data/tmp.sqlite --init-db
 
 ---
 
-## 12. 推荐本地工作流
+## 13. 推荐本地工作流
 
 开发或验证逻辑：
 

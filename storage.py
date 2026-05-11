@@ -73,6 +73,12 @@ class Storage:
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS app_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_turns_session_id_id
                     ON turns(session_id, id);
                 CREATE INDEX IF NOT EXISTS idx_state_snapshots_session_id_id
@@ -119,6 +125,77 @@ class Storage:
                 "UPDATE sessions SET closed_at = ?, updated_at = ? WHERE session_id = ?",
                 (now_iso(), now_iso(), session_id),
             )
+
+    def list_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
+        limit = max(1, min(100, int(limit or 20)))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    s.session_id,
+                    s.title,
+                    s.created_at,
+                    s.updated_at,
+                    s.closed_at,
+                    COALESCE((
+                        SELECT ss.round
+                        FROM state_snapshots ss
+                        WHERE ss.session_id = s.session_id
+                        ORDER BY ss.id DESC
+                        LIMIT 1
+                    ), 0) AS latest_round,
+                    (
+                        SELECT COUNT(*)
+                        FROM turns t
+                        WHERE t.session_id = s.session_id
+                    ) AS turn_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM clone_runs cr
+                        WHERE cr.session_id = s.session_id
+                    ) AS clone_run_count
+                FROM sessions s
+                ORDER BY s.updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def session_exists(self, session_id: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return row is not None
+
+    def get_active_session_id(self) -> Optional[str]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_meta WHERE key = 'active_session_id' LIMIT 1"
+            ).fetchone()
+        if not row:
+            return None
+        session_id = str(row["value"])
+        return session_id if self.session_exists(session_id) else None
+
+    def set_active_session_id(self, session_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_meta(key, value, updated_at)
+                VALUES ('active_session_id', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (session_id, now_iso()),
+            )
+
+    def clear_active_session_id(self) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM app_meta WHERE key = 'active_session_id'")
 
     def save_turn(
         self,
@@ -246,6 +323,75 @@ class Storage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def all_session_ids(self) -> List[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id FROM sessions ORDER BY updated_at DESC"
+            ).fetchall()
+        return [row["session_id"] for row in rows]
+
+    def export_session_data(self, session_id: str) -> Dict[str, Any]:
+        with self.connect() as conn:
+            session = conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if session is None:
+                raise KeyError(f"session not found: {session_id}")
+
+            turns = conn.execute(
+                """
+                SELECT id, session_id, round, speaker, content, metadata, created_at
+                FROM turns
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+            snapshots = conn.execute(
+                """
+                SELECT id, session_id, round, state_json, created_at
+                FROM state_snapshots
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+            clone_runs = conn.execute(
+                """
+                SELECT clone_group_id, session_id, role, status, started_at, completed_at, error
+                FROM clone_runs
+                WHERE session_id = ?
+                ORDER BY started_at ASC
+                """,
+                (session_id,),
+            ).fetchall()
+
+        parsed_turns = []
+        for row in turns:
+            item = dict(row)
+            item["metadata"] = _parse_json_object(item.get("metadata"), {})
+            parsed_turns.append(item)
+
+        parsed_snapshots = []
+        latest_state: Dict[str, Any] = {}
+        for row in snapshots:
+            item = dict(row)
+            state = _parse_json_object(item.pop("state_json", ""), {})
+            item["state"] = state
+            parsed_snapshots.append(item)
+            latest_state = state
+
+        return {
+            "schema_version": 1,
+            "exported_at": now_iso(),
+            "session": dict(session),
+            "latest_state": latest_state,
+            "turns": parsed_turns,
+            "state_snapshots": parsed_snapshots,
+            "clone_runs": [dict(row) for row in clone_runs],
+        }
+
     def load_latest_state(self, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         if session_id is None:
             session_id = self.latest_session_id()
@@ -273,3 +419,16 @@ class Storage:
             conn.execute("DELETE FROM turns")
             conn.execute("DELETE FROM state_snapshots")
             conn.execute("DELETE FROM sessions")
+            conn.execute("DELETE FROM app_meta")
+
+
+def _parse_json_object(value: Any, default: Dict[str, Any]) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return default
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return default
+    return parsed if isinstance(parsed, dict) else default
