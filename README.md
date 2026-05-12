@@ -353,6 +353,10 @@ KILLME_JSON_RESPONSE_FORMAT=0 uv run python main.py
 /export-all
 /state
 /summary
+/position
+/position set <text>
+/position add <text>
+/position clear
 /checkpoint
 /config <executioner|defender|builder|judge> <max_clones>
 /close
@@ -374,6 +378,10 @@ KILLME_JSON_RESPONSE_FORMAT=0 uv run python main.py
 - `/export-all` 导出全部 sessions；
 - `/state` 输出当前 shared state；
 - `/summary` 输出当前 session 摘要；
+- `/position` 显示当前 `user_position`；
+- `/position set <text>` 手动覆盖 `user_position`；
+- `/position add <text>` 手动合并新的长期约束；
+- `/position clear` 清空回初始立场；
 - `/checkpoint` 保存当前 state snapshot；
 - `/config` 修改非 Chair 角色的 clone 上限；
 - `/close` 需要先有 Judge verdict；

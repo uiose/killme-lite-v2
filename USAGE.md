@@ -474,21 +474,25 @@ uv run python main.py --db ./data/real-llm-smoke.sqlite
 | `/export-all` | 导出全部 sessions | 你想一次性备份本地所有会话 |
 | `/state` | 输出当前 shared state JSON | 你想检查系统当前记住了什么 |
 | `/summary` | 输出当前 session 的简洁摘要 | 你想快速了解当前进度和下一步 |
+| `/position` | 显示当前 `user_position` | 你想检查系统目前把哪些内容当作长期约束 |
+| `/position set <text>` | 手动覆盖 `user_position` | 当前长期立场被污染或需要重写 |
+| `/position add <text>` | 手动合并新的长期约束 | 你明确希望后续 Chair 和角色持续参考这条约束 |
+| `/position clear` | 清空回初始立场 | 你想移除已有长期约束 |
 | `/checkpoint` | 保存当前 state snapshot，并输出摘要 | 重要节点前后想手动留档 |
 | `/close` | 在已有 Judge verdict 后关闭当前 major question | 当前问题已经裁决，准备进入下一问题 |
 | `/close --force` | 未裁决也强制关闭当前 major question | 你明确想跳过裁决，但仍保留关闭记录 |
 | `/reset` | 清空本地 sessions、turns、state_snapshots、clone_runs | 本地开发或测试时重置数据 |
 | `/quit` | 退出 CLI | 结束当前 REPL |
 
-不以 `/` 开头的自然语言输入会被分成两类：
+不以 `/` 开头的自然语言输入不会自动写入 `user_position`：
 
 - 追问/澄清：例如 `这是什么意思，什么的方案`、`为什么这么判断？`、`展开一下第二点`。系统会基于 recent turns 回答，不写入 `user_position`。
-- 长期约束/立场更新：例如 `我的约束是不能接真实写接口`、`我希望先做离线验证`。系统会合并进 `user_position`，供后续 Chair 和角色参考。
+- 普通陈述：系统只记录到 turns，不写入 `user_position`，避免把临时表达误当成长期约束。
 
-如果你想明确新增长期约束，推荐写成：
+如果你想明确新增长期约束，使用：
 
 ```text
-我的约束是：第一阶段不能接真实写 API，只能做离线回放。
+/position add 第一阶段不能接真实写 API，只能做离线回放。
 ```
 
 `/auto <n>` 的 `n` 是调度步数，不是对话轮数。一次调度可能调用一个角色，也可能生成 clones 并触发 Merger。项目故意限制单次最多 3 步，避免早期错误判断被自动放大。

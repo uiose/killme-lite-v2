@@ -181,7 +181,16 @@ MVP 规则：
 
 `user_position` 代表压缩后的当前用户立场，不是最近一次用户原话。
 
-自然语言输入不会覆盖旧立场。运行时会把新输入合并为短约束列表，例如：
+自然语言输入不会覆盖旧立场，也不会默认写入 `user_position`。用户必须通过显式命令维护长期约束：
+
+```text
+/position
+/position set <text>
+/position add <text>
+/position clear
+```
+
+运行时会把 `/position add <text>` 合并为短约束列表，例如：
 
 ```text
 当前用户立场（压缩，不等于最近一次原话）：
@@ -195,6 +204,7 @@ MVP 规则：
 
 - 用户原话仍保存在 `turns`；
 - `user_position` 只保存持续影响判断的压缩立场；
+- `user_position` 只能由 `/position` 系列命令手动显示和修改；
 - 不允许任何 agent 替用户新增偏好；
 - 不允许普通 agent 修改 `user_position`；
 - 如果用户后来明确修正约束，应作为新立场追加，由后续 Chair/Judge 解释冲突。

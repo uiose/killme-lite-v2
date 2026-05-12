@@ -8,6 +8,7 @@ from config import AppConfig, load_config
 from llm import LLMClient, extract_json
 from merger import merge_clone_outputs
 from state import (
+    INITIAL_USER_POSITION,
     MAX_CLONE_LIMIT,
     append_major_question_history,
     apply_state_patch,
@@ -92,6 +93,9 @@ class Router:
 
         if command == "/summary":
             return self.cmd_summary()
+
+        if command in {"/position", "/user-position"}:
+            return self.cmd_position(arg)
 
         if command == "/checkpoint":
             return self.cmd_checkpoint()
@@ -295,6 +299,46 @@ class Router:
         state = self._require_state()
         return self._format_summary(state)
 
+    def cmd_position(self, arg: str = "") -> str:
+        state = self._require_state()
+        action, value = self._split_position_arg(arg)
+
+        if action in {"", "show"}:
+            return self._format_user_position(state)
+
+        if action not in {"set", "add", "clear"}:
+            return "用法：/position [show] | /position set <text> | /position add <text> | /position clear"
+
+        previous_position = state.get("user_position", "")
+        if action == "clear":
+            updated_position = INITIAL_USER_POSITION
+        else:
+            if not value:
+                return f"用法：/position {action} <text>"
+            if action == "set":
+                updated_position = value.strip()
+            else:
+                updated_position = merge_user_position(previous_position, value)
+
+        state = increment_round(state)
+        state["user_position"] = updated_position
+        state["requires_user_intervention"] = False
+        state = ensure_shape(state)
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "user",
+            f"/position {action}" + (f" {value}" if value else ""),
+            {
+                "type": "manual_user_position_update",
+                "action": action,
+                "previous_user_position": previous_position,
+                "updated_user_position": state["user_position"],
+            },
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        return "已手动更新 user_position。\n\n" + self._format_user_position(state)
+
     def cmd_checkpoint(self) -> str:
         state = self._require_state()
         state = increment_round(state)
@@ -390,22 +434,19 @@ class Router:
             return self._handle_contextual_question(state, text)
 
         state = increment_round(state)
-        previous_position = state.get("user_position", "")
-        state["user_position"] = merge_user_position(previous_position, text)
-        state["requires_user_intervention"] = False
+        state["requires_user_intervention"] = True
         self.storage.save_turn(
             state["session_id"],
             state["round"],
             "user",
             text,
-            {
-                "type": "user_position_update",
-                "previous_user_position": previous_position,
-                "updated_user_position": state["user_position"],
-            },
+            {"type": "user_message", "user_position_unchanged": True},
         )
         self.storage.save_snapshot(state["session_id"], state)
-        return "已合并用户输入到 user_position，而不是覆盖旧约束。可继续 /auto 3、/exec、/spawn、/defend、/build、/judge、/summary 或 /close。"
+        return (
+            "已记录这条用户消息，但没有写入 user_position。\n"
+            "如果这是长期约束或立场，请使用 /position add <text>；如果要覆盖，请使用 /position set <text>。"
+        )
 
     def _handle_contextual_question(self, state: Dict[str, Any], text: str) -> str:
         recent_before = self.storage.recent_turns(state["session_id"], limit=10)
@@ -429,7 +470,7 @@ class Router:
             {"type": "contextual_answer", "user_position_unchanged": True},
         )
         self.storage.save_snapshot(state["session_id"], state)
-        return answer + "\n\n（这次追问没有写入 user_position；如果你是在新增长期约束，可以直接说“我的约束是...”。）"
+        return answer + "\n\n（这次追问没有写入 user_position；如果你是在新增长期约束，请使用 /position add <text>。）"
 
     def _chair_step(self, auto_step: int) -> str:
         state = self._require_state()
@@ -1089,7 +1130,7 @@ Reason:
             f"- pending_next_question: {state.get('pending_next_question') or '暂无'}\n"
             f"- major_question_history_count: {history_count}\n"
             f"- recent_open_questions: {json.dumps(last_open, ensure_ascii=False)}\n"
-            "- useful_commands: /auto 3, /exec, /spawn <role> <n>, /defend, /build, /judge, /close, /close --force"
+            "- useful_commands: /position, /position add <text>, /auto 3, /exec, /spawn <role> <n>, /defend, /build, /judge, /close, /close --force"
         )
 
     def _format_chair_decision(self, decision: Dict[str, Any]) -> str:
@@ -1249,3 +1290,19 @@ Reason:
         command = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else ""
         return command, arg
+
+    def _split_position_arg(self, arg: str) -> Tuple[str, str]:
+        arg = (arg or "").strip()
+        if not arg:
+            return "", ""
+        parts = arg.split(maxsplit=1)
+        action = parts[0].lower()
+        value = parts[1] if len(parts) > 1 else ""
+        return action, value
+
+    def _format_user_position(self, state: Dict[str, Any]) -> str:
+        return (
+            "## User position\n"
+            f"{state.get('user_position') or INITIAL_USER_POSITION}\n\n"
+            "可用命令：/position set <text>、/position add <text>、/position clear"
+        )

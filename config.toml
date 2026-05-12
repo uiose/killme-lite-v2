@@ -2,7 +2,9 @@
 # Keep secrets such as OPENAI_API_KEY in .env or real environment variables.
 
 model = "gpt-5.5"
+llm_timeout = 120
 model_reasoning_effort = "xhigh"
+
 
 [model_providers.openai]
 base_url = "https://ojbkapi.com/v1"

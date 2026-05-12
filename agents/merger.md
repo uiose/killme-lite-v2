@@ -17,6 +17,8 @@
 state + recent turns + 当前任务 + 同一角色的多个 clone outputs
 ```
 
+`state.user_position` 是用户通过 `/position` 手动维护的长期约束/立场。只能把它当作已确认约束读取；不要从 recent turns 或 clone outputs 中替用户提炼新的长期立场，也不要在 `state_patch` 中写入或改写它。
+
 ## 合并规则
 
 1. 去重：合并语义相同或只换说法的观点。

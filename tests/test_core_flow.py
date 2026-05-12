@@ -114,6 +114,38 @@ class RouterFlowTests(unittest.TestCase):
         assistant_turns = [turn for turn in turns if turn["speaker"] == "assistant"]
         self.assertEqual(assistant_turns[-1]["metadata"]["type"], "contextual_answer")
 
+    def test_plain_user_message_does_not_update_user_position(self) -> None:
+        self.start()
+        before = self.router.storage.load_latest_state()
+        assert before is not None
+
+        output = self.router.handle_line("我随便吐槽一下刚才的输出")
+        after = self.router.storage.load_latest_state()
+        assert after is not None
+
+        self.assertEqual(after["user_position"], before["user_position"])
+        self.assertIn("没有写入 user_position", output)
+
+        turns = self.router.storage.recent_turns(after["session_id"], limit=3)
+        self.assertEqual(turns[-1]["metadata"]["type"], "user_message")
+        self.assertTrue(turns[-1]["metadata"]["user_position_unchanged"])
+
+    def test_position_command_can_show_set_add_and_clear(self) -> None:
+        self.start()
+
+        show_output = self.router.handle_line("/position")
+        set_output = self.router.handle_line("/position set 用户只接受离线验证")
+        add_output = self.router.handle_line("/position add 不能接真实写接口")
+        clear_output = self.router.handle_line("/position clear")
+        state = self.router.storage.load_latest_state()
+        assert state is not None
+
+        self.assertIn("## User position", show_output)
+        self.assertIn("用户只接受离线验证", set_output)
+        self.assertIn("不能接真实写接口", add_output)
+        self.assertIn("尚未补充额外约束", clear_output)
+        self.assertEqual(state["user_position"], "用户刚启动审议，尚未补充额外约束。")
+
     def test_spawn_refuses_to_exceed_configured_limit(self) -> None:
         self.start()
         self.router.handle_line("/config judge 1")
