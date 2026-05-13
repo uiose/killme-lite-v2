@@ -119,7 +119,7 @@ class RouterFlowTests(unittest.TestCase):
         before = self.router.storage.load_latest_state()
         assert before is not None
 
-        output = self.router.handle_line("我随便吐槽一下刚才的输出")
+        output = self.router.handle_line("我只是记录一个临时想法")
         after = self.router.storage.load_latest_state()
         assert after is not None
 

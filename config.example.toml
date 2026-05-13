@@ -3,7 +3,18 @@
 
 model = "gpt-5.5"
 model_reasoning_effort = "xhigh"
+llm_timeout = 120
+
+# openai | deepseek | openai_then_deepseek_per_command
+llm_mode = "openai"
 
 [model_providers.openai]
 base_url = "https://api.openai.com/v1"
 wire_api = "chat"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com"
+wire_api = "chat"
+model = "deepseek-v4-pro"
+model_reasoning_effort = "high"
+thinking = "enabled"

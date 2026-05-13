@@ -50,13 +50,22 @@ class Router:
         self.base_dir = Path(base_dir)
         self.config = config or load_config(self.base_dir)
         self.storage = Storage(db_path or self.config.db_path)
-        self.llm = LLMClient(base_dir=self.base_dir, config=self.config)
         self.progress = progress
+        self.llm = LLMClient(base_dir=self.base_dir, config=self.config)
+        self.llm.progress = self._progress
 
     def handle_line(self, line: str) -> str:
-        if line.startswith("/"):
-            return self.handle_command(line)
-        return self.handle_user_message(line)
+        begin_command = getattr(self.llm, "begin_command", None)
+        end_command = getattr(self.llm, "end_command", None)
+        if callable(begin_command):
+            begin_command()
+        try:
+            if line.startswith("/"):
+                return self.handle_command(line)
+            return self.handle_user_message(line)
+        finally:
+            if callable(end_command):
+                end_command()
 
     def handle_command(self, line: str) -> str:
         command, arg = self._split_command(line)
@@ -824,7 +833,9 @@ class Router:
         recent_turns: List[Dict[str, Any]],
     ) -> str:
         fallback = self._fallback_contextual_answer(state, question, recent_turns)
-        if self.config.mock_llm or not self.config.openai_api_key:
+        has_provider = getattr(self.llm, "has_configured_provider", None)
+        has_real_llm = callable(has_provider) and has_provider()
+        if self.config.mock_llm or not has_real_llm:
             return fallback
 
         self._progress("answering contextual follow-up from recent turns")

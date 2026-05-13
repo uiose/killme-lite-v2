@@ -4,8 +4,16 @@
 model = "gpt-5.5"
 llm_timeout = 120
 model_reasoning_effort = "xhigh"
-
+llm_mode = "deepseek"
+# `openai` / `deepseek` / `openai_then_deepseek_per_command` |
 
 [model_providers.openai]
 base_url = "https://ojbkapi.com/v1"
 wire_api = "chat"
+
+[model_providers.deepseek]
+base_url = "https://llmapi.paratera.com/v1"
+wire_api = "chat"
+model = "DeepSeek-V4-Pro"
+model_reasoning_effort = "high"
+thinking = "enabled"

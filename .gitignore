@@ -13,3 +13,5 @@ __pycache__/
 /tmp/
 exports/
 doc/
+test-tmp/
+tmp/

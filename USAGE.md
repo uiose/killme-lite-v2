@@ -73,6 +73,7 @@ process environment > config.toml > .env > default
 ```env
 # Secrets
 OPENAI_API_KEY=
+DEEPSEEK_API_KEY=
 
 # Runtime
 KILLME_DATA_DIR=./data
@@ -109,6 +110,7 @@ mock 模式适合回归测试和开发，不适合判断真实提示词质量。
 
 ```env
 OPENAI_API_KEY=sk-your-real-key
+DEEPSEEK_API_KEY=
 
 KILLME_DATA_DIR=./data
 KILLME_DB_PATH=./data/killme.sqlite
@@ -123,6 +125,7 @@ KILLME_LOG_LEVEL=INFO
 model = "gpt-5.5"
 model_reasoning_effort = "xhigh"
 json_response_format = true
+llm_mode = "openai"
 
 [model_providers.openai]
 base_url = "https://api.openai.com/v1"
@@ -217,6 +220,12 @@ wire_api = "chat"
 | `OPENAI_BASE_URL` | API base URL，可覆盖 `config.toml` | `https://api.openai.com/v1` |
 | `OPENAI_MODEL` | 模型名，可覆盖 `config.toml` | `gpt-5.5` |
 | `OPENAI_REASONING_EFFORT` | reasoning effort | `low` / `medium` / `high` / `xhigh` |
+| `DEEPSEEK_API_KEY` | DeepSeek API key，可留空占位 | `sk-...` |
+| `DEEPSEEK_BASE_URL` | DeepSeek base URL，可覆盖 `config.toml` | `https://api.deepseek.com` |
+| `DEEPSEEK_MODEL` | DeepSeek 模型名 | `deepseek-v4-pro` |
+| `DEEPSEEK_REASONING_EFFORT` | DeepSeek reasoning effort | `high` / `max` |
+| `DEEPSEEK_THINKING` | DeepSeek thinking 开关 | `enabled` / `disabled` |
+| `KILLME_LLM_MODE` | LLM provider 模式 | `openai` / `deepseek` / `openai_then_deepseek_per_command` |
 | `KILLME_DATA_DIR` | 数据目录 | `./data` |
 | `KILLME_DB_PATH` | SQLite 数据库路径 | `./data/killme.sqlite` |
 | `KILLME_LLM_TIMEOUT` | LLM 请求超时秒数，最小 5 | `120` |
@@ -275,6 +284,9 @@ db_path = "./data/killme.sqlite"
 # 可选：LLM 请求超时秒数。
 llm_timeout = 120
 
+# openai | deepseek | openai_then_deepseek_per_command
+llm_mode = "openai"
+
 # 可选：是否强制 mock LLM。
 mock_llm = false
 
@@ -290,6 +302,13 @@ model_provider = "openai"
 [model_providers.openai]
 base_url = "https://api.openai.com/v1"
 wire_api = "chat"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com"
+wire_api = "chat"
+model = "deepseek-v4-pro"
+model_reasoning_effort = "high"
+thinking = "enabled"
 ```
 
 当前 runtime 使用 OpenAI-compatible `chat/completions` 接口；`wire_api = "chat"` 主要作为配置语义保留。

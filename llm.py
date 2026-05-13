@@ -1,14 +1,19 @@
 import json
 import re
+import socket
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from config import AppConfig, load_config
+from config import AppConfig, ProviderConfig, load_config
 
 
 class LLMError(RuntimeError):
+    pass
+
+
+class LLMTimeoutError(LLMError):
     pass
 
 
@@ -16,13 +21,30 @@ class LLMClient:
     def __init__(self, base_dir: Path, config: Optional[AppConfig] = None):
         self.base_dir = Path(base_dir)
         self.config = config or load_config(self.base_dir)
+        self.providers = self.config.model_providers
         self.api_key = self.config.openai_api_key
         self.base_url = self.config.openai_base_url.rstrip("/")
         self.model = self.config.openai_model
         self.reasoning_effort = self.config.openai_reasoning_effort
+        self.llm_mode = self.config.llm_mode
         self.force_mock = self.config.mock_llm
         self.use_response_format = self.config.json_response_format
         self.timeout_seconds = self.config.llm_timeout
+        self.progress: Optional[Callable[[str], None]] = None
+        self.last_provider: Optional[str] = None
+        self.last_fallback_used = False
+        self._command_active_provider: Optional[str] = None
+
+    def begin_command(self) -> None:
+        self._command_active_provider = self._initial_provider_name()
+        self.last_fallback_used = False
+
+    def end_command(self) -> None:
+        self._command_active_provider = None
+        self.last_fallback_used = False
+
+    def has_configured_provider(self) -> bool:
+        return bool(self._provider(self._initial_provider_name()).api_key)
 
     def call_agent(
         self,
@@ -42,7 +64,7 @@ class LLMClient:
             "important_runtime_rule": "If this is a clone call, all clones in the same group receive an identical frozen state snapshot. Do not rely on sibling clone output.",
         }
 
-        if self.force_mock or not self.api_key:
+        if self.force_mock or not self._provider(self._current_provider_name()).api_key:
             return mock_agent(role, payload)
 
         prompt = self.load_prompt(role)
@@ -64,41 +86,105 @@ class LLMClient:
         return path.read_text(encoding="utf-8")
 
     def chat_completion(self, messages: List[Dict[str, str]]) -> str:
-        url = f"{self.base_url}/chat/completions"
+        provider_name = self._current_provider_name()
+        try:
+            return self._chat_completion_with_provider(provider_name, messages)
+        except LLMTimeoutError:
+            if not self._should_retry_with_deepseek(provider_name):
+                raise
+            self._emit_progress(
+                "LLM timeout on provider openai; retrying with deepseek for this command"
+            )
+            self._command_active_provider = "deepseek"
+            self.last_fallback_used = True
+            return self._chat_completion_with_provider("deepseek", messages)
+
+    def _chat_completion_with_provider(
+        self,
+        provider_name: str,
+        messages: List[Dict[str, str]],
+    ) -> str:
+        provider = self._provider(provider_name)
+        if provider.wire_api != "chat":
+            raise LLMError(f"Unsupported wire_api for provider {provider.name}: {provider.wire_api}")
+        if not provider.api_key:
+            raise LLMError(f"Missing API key for provider {provider.name}")
+
+        url = f"{provider.base_url}/chat/completions"
         body: Dict[str, Any] = {
-            "model": self.model,
+            "model": provider.model,
             "messages": messages,
-            "temperature": 0.2,
         }
-        if self.reasoning_effort:
-            body["reasoning_effort"] = self.reasoning_effort
+        if not (provider.name == "deepseek" and provider.thinking == "enabled"):
+            body["temperature"] = 0.2
+        if provider.reasoning_effort:
+            body["reasoning_effort"] = provider.reasoning_effort
         if self.use_response_format:
             body["response_format"] = {"type": "json_object"}
+        if provider.name == "deepseek" and provider.thinking in {"enabled", "disabled"}:
+            body["thinking"] = {"type": provider.thinking}
 
         req = urllib.request.Request(
             url,
             data=json.dumps(body).encode("utf-8"),
             method="POST",
             headers={
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {provider.api_key}",
                 "Content-Type": "application/json",
                 "User-Agent": "OpenAI/Python",
             },
         )
 
+        self.last_provider = provider.name
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             raise LLMError(f"LLM HTTP error {exc.code}: {error_body}") from exc
+        except TimeoutError as exc:
+            raise LLMTimeoutError(f"LLM request timed out on provider {provider.name}") from exc
         except urllib.error.URLError as exc:
+            if _is_timeout_reason(exc.reason):
+                raise LLMTimeoutError(f"LLM request timed out on provider {provider.name}") from exc
             raise LLMError(f"LLM request failed: {exc}") from exc
 
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"Unexpected LLM response: {data}") from exc
+
+    def _initial_provider_name(self) -> str:
+        if self.llm_mode == "deepseek":
+            return "deepseek"
+        return "openai"
+
+    def _current_provider_name(self) -> str:
+        if self.llm_mode == "deepseek":
+            return "deepseek"
+        if self.llm_mode == "openai":
+            return "openai"
+        return self._command_active_provider or "openai"
+
+    def _provider(self, provider_name: str) -> ProviderConfig:
+        try:
+            return self.providers[provider_name]
+        except KeyError as exc:
+            raise LLMError(f"Unknown provider: {provider_name}") from exc
+
+    def _should_retry_with_deepseek(self, provider_name: str) -> bool:
+        return self.llm_mode == "openai_then_deepseek_per_command" and provider_name == "openai"
+
+    def _emit_progress(self, message: str) -> None:
+        if self.progress is not None:
+            self.progress(message)
+
+
+def _is_timeout_reason(reason: Any) -> bool:
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return True
+    lowered = str(reason).lower()
+    return "timed out" in lowered or "timeout" in lowered
 
 
 def extract_json(text: str) -> Any:
