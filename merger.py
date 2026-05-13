@@ -265,19 +265,20 @@ def _build_state_patch(
         "open_questions": [],
         "killed_arguments": [],
         "surviving_arguments": [],
+        "evidence_requests": [],
     }
 
     for item in patches:
         if not isinstance(item, dict):
             continue
-        for list_field in ("open_questions", "killed_arguments", "surviving_arguments"):
+        for list_field in ("open_questions", "killed_arguments", "surviving_arguments", "evidence_requests"):
             value = item.get(list_field, [])
             if isinstance(value, list):
                 patch[list_field].extend(value)
             elif value not in (None, ""):
                 patch[list_field].append(value)
 
-    for list_field in ("open_questions", "killed_arguments", "surviving_arguments"):
+    for list_field in ("open_questions", "killed_arguments", "surviving_arguments", "evidence_requests"):
         patch[list_field], _ = _dedupe_with_removed(patch[list_field])
 
     strongest = points[0]["claim"] if points else ""
@@ -299,6 +300,7 @@ def _build_state_patch(
             "open_questions": [],
             "killed_arguments": [],
             "surviving_arguments": [],
+            "evidence_requests": [],
         },
         patch,
     )
@@ -310,6 +312,7 @@ def _build_state_patch(
         "open_questions",
         "killed_arguments",
         "surviving_arguments",
+        "evidence_requests",
     }
     return {key: value for key, value in clean_patch.items() if key in allowed}
 

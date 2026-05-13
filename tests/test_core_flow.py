@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import tempfile
 import unittest
@@ -153,6 +154,46 @@ class RouterFlowTests(unittest.TestCase):
         output = self.router.handle_line("/spawn judge 2")
 
         self.assertIn("judge 当前 clone 上限是 1", output)
+
+    def test_evidence_commands_add_import_and_list_items(self) -> None:
+        self.start()
+
+        add_output = self.router.handle_line("/evidence add ToolBench has public tool-use tasks")
+        evidence_path = Path(self.tmp.name) / "evidence.json"
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "title": "ALCE benchmark",
+                    "url": "https://example.test/alce",
+                    "source_type": "benchmark",
+                    "key_quote_or_summary": "Citation grounding benchmark notes.",
+                    "reliability": "high",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        import_output = self.router.handle_line(f"/evidence import {evidence_path}")
+        list_output = self.router.handle_line("/evidence")
+        state = self.router.storage.load_latest_state()
+        assert state is not None
+
+        self.assertIn("已导入 1 条 evidence item", add_output)
+        self.assertIn("已导入 1 条 evidence item", import_output)
+        self.assertEqual(len(state["evidence_items"]), 2)
+        self.assertIn("ToolBench has public tool-use tasks", list_output)
+        self.assertIn("ALCE benchmark", list_output)
+
+    def test_evidence_request_command_records_search_need(self) -> None:
+        self.start()
+
+        output = self.router.handle_line("/evidence request ToolBench quickstart solution path")
+        state = self.router.storage.load_latest_state()
+        assert state is not None
+
+        self.assertEqual(len(state["evidence_requests"]), 1)
+        self.assertIn("ToolBench quickstart solution path", output)
+        self.assertIn("Evidence requests", output)
 
 
 if __name__ == "__main__":

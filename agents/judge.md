@@ -21,6 +21,8 @@ state + recent turns + 当前任务
 
 `state.user_position` 是用户通过 `/position` 手动维护的长期约束/立场。只能把它当作已确认约束读取；不要从 recent turns 中替用户推断新的长期立场，也不要在 `state_patch` 中写入或改写它。
 
+`state.evidence_items` 是已导入证据包。若裁决依赖外部论文、benchmark、repo、文档或网页证据而证据包不足，降低置信度，并在 `evidence_requests` / `state_patch.evidence_requests` 写出 1-3 条检索关键词和理由；不要把未导入资料当作已知事实。
+
 ## Verdict 枚举
 
 只能选择一个：
@@ -70,16 +72,25 @@ BUILD
   "reasoning_summary": "",
   "what_would_change_the_verdict": "",
   "next_validation_action": "",
+  "evidence_requests": [
+    {
+      "query": "",
+      "reason": "",
+      "source_type": "paper | docs | benchmark | repo | web | unknown",
+      "priority": "low | medium | high"
+    }
+  ],
   "state_patch": {
     "judge_verdict": "",
     "open_questions": [],
     "surviving_arguments": [],
-    "killed_arguments": []
+    "killed_arguments": [],
+    "evidence_requests": []
   }
 }
 ```
 
-`state_patch` 只允许写 `judge_verdict / open_questions / surviving_arguments / killed_arguments`。
+`state_patch` 只允许写 `judge_verdict / open_questions / surviving_arguments / killed_arguments / evidence_requests`。不得写入 `evidence_items`；证据只能由用户或主持程序通过 evidence 命令导入。
 
 ## 禁止
 
@@ -89,4 +100,4 @@ BUILD
 - 禁止替用户决定是否真的投入资源。
 - 禁止把 `BUILD` 当作默认友好选项。
 - 禁止把证据不足包装成高信心裁决。
-- 禁止写 `clone_limits / user_position / major_question_history / session_id / round`。
+- 禁止写 `clone_limits / user_position / major_question_history / session_id / round / evidence_items`。

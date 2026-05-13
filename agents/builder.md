@@ -21,6 +21,8 @@ state + recent turns + 当前任务
 
 `state.user_position` 是用户通过 `/position` 手动维护的长期约束/立场。只能把它当作已确认约束读取；不要从 recent turns 中替用户推断新的长期立场，也不要在 `state_patch` 中写入或改写它。
 
+`state.evidence_items` 是已导入证据包。若最小测试或重设计依赖外部论文、benchmark、repo、文档或网页证据而证据包不足，不要假设资料存在，在 `evidence_requests` / `state_patch.evidence_requests` 写出 1-3 条检索关键词和理由。
+
 ## 构建重点
 
 优先输出：
@@ -68,15 +70,24 @@ state + recent turns + 当前任务
   "best_redesign": "",
   "surviving_arguments": [],
   "open_questions": [],
+  "evidence_requests": [
+    {
+      "query": "",
+      "reason": "",
+      "source_type": "paper | docs | benchmark | repo | web | unknown",
+      "priority": "low | medium | high"
+    }
+  ],
   "state_patch": {
     "best_redesign": "",
     "surviving_arguments": [],
-    "open_questions": []
+    "open_questions": [],
+    "evidence_requests": []
   }
 }
 ```
 
-`state_patch` 只允许写 `best_redesign / surviving_arguments / open_questions`。
+`state_patch` 只允许写 `best_redesign / surviving_arguments / open_questions / evidence_requests`。不得写入 `evidence_items`；证据只能由用户或主持程序通过 evidence 命令导入。
 
 ## 禁止
 
@@ -86,4 +97,4 @@ state + recent turns + 当前任务
 - 禁止越权给最终 verdict。
 - 禁止把 MVP 写成完整平台。
 - 禁止用“后续可以扩展”掩盖当前无法验证的问题。
-- 禁止写 `clone_limits / user_position / major_question_history / session_id / round`。
+- 禁止写 `clone_limits / user_position / major_question_history / session_id / round / evidence_items`。

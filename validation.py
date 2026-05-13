@@ -7,7 +7,7 @@ VALID_ROLES = {"executioner", "defender", "builder", "judge"}
 VALID_DECISION_TYPES = {"call_role", "spawn_clones", "judge", "close_question", "wait_user"}
 VALID_VERDICTS = {"KILL", "REDESIGN", "TEST", "BUILD", "undecided"}
 VALID_CONFIDENCE = {"low", "medium", "high"}
-LIST_PATCH_FIELDS = {"open_questions", "killed_arguments", "surviving_arguments"}
+LIST_PATCH_FIELDS = {"open_questions", "killed_arguments", "surviving_arguments", "evidence_requests"}
 SCALAR_PATCH_FIELDS = {
     "current_major_question",
     "strongest_attack",
@@ -18,11 +18,22 @@ SCALAR_PATCH_FIELDS = {
     "requires_user_intervention",
 }
 PATCH_FIELDS_BY_ROLE = {
-    "chair": {"current_major_question", "pending_next_question", "requires_user_intervention"},
-    "executioner": {"strongest_attack", "killed_arguments", "open_questions"},
-    "defender": {"strongest_defense", "surviving_arguments", "open_questions"},
-    "builder": {"best_redesign", "surviving_arguments", "open_questions"},
-    "judge": {"judge_verdict", "open_questions", "surviving_arguments", "killed_arguments"},
+    "chair": {
+        "current_major_question",
+        "pending_next_question",
+        "requires_user_intervention",
+        "evidence_requests",
+    },
+    "executioner": {"strongest_attack", "killed_arguments", "open_questions", "evidence_requests"},
+    "defender": {"strongest_defense", "surviving_arguments", "open_questions", "evidence_requests"},
+    "builder": {"best_redesign", "surviving_arguments", "open_questions", "evidence_requests"},
+    "judge": {
+        "judge_verdict",
+        "open_questions",
+        "surviving_arguments",
+        "killed_arguments",
+        "evidence_requests",
+    },
     "merger": {
         "strongest_attack",
         "strongest_defense",
@@ -31,6 +42,7 @@ PATCH_FIELDS_BY_ROLE = {
         "open_questions",
         "killed_arguments",
         "surviving_arguments",
+        "evidence_requests",
     },
 }
 MAX_TEXT = 1600
@@ -133,6 +145,9 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
 
     role = normalize_role(role) or role
     patch = sanitize_state_patch(_raw_state_patch(data), state, source_role=role)
+    evidence_requests = _list(data.get("evidence_requests"))
+    if evidence_requests and "evidence_requests" not in patch:
+        patch["evidence_requests"] = evidence_requests
 
     if role == "executioner":
         strongest = _text(data.get("strongest_attack"))
@@ -151,6 +166,7 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
             "strongest_attack": strongest,
             "killed_arguments": killed,
             "open_questions": open_questions,
+            "evidence_requests": evidence_requests,
             "state_patch": patch,
             "validation_warnings": issues,
         }
@@ -172,6 +188,7 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
             "strongest_defense": strongest,
             "surviving_arguments": surviving,
             "open_questions": open_questions,
+            "evidence_requests": evidence_requests,
             "state_patch": patch,
             "validation_warnings": issues,
         }
@@ -193,6 +210,7 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
             "best_redesign": best,
             "surviving_arguments": surviving,
             "open_questions": open_questions,
+            "evidence_requests": evidence_requests,
             "state_patch": patch,
             "validation_warnings": issues,
         }
@@ -212,6 +230,7 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
             "reasoning_summary": _text(data.get("reasoning_summary")),
             "what_would_change_the_verdict": _text(data.get("what_would_change_the_verdict")),
             "next_validation_action": _text(data.get("next_validation_action")),
+            "evidence_requests": evidence_requests,
             "state_patch": patch,
             "validation_warnings": issues,
         }

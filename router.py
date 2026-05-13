@@ -106,6 +106,9 @@ class Router:
         if command in {"/position", "/user-position"}:
             return self.cmd_position(arg)
 
+        if command == "/evidence":
+            return self.cmd_evidence(arg)
+
         if command == "/checkpoint":
             return self.cmd_checkpoint()
 
@@ -347,6 +350,56 @@ class Router:
         )
         self.storage.save_snapshot(state["session_id"], state)
         return "已手动更新 user_position。\n\n" + self._format_user_position(state)
+
+    def cmd_evidence(self, arg: str = "") -> str:
+        state = self._require_state()
+        action, value = self._split_evidence_arg(arg)
+
+        if action in {"", "show", "list"}:
+            return self._format_evidence_pack(state)
+
+        if action == "requests":
+            return self._format_evidence_requests(state)
+
+        if action == "request":
+            if not value:
+                return "用法：/evidence request <search keywords or evidence need>"
+            request = self._normalize_evidence_request({"query": value, "reason": "manual request"})
+            state = increment_round(state)
+            state["evidence_requests"] = self._append_unique_state_item(state.get("evidence_requests"), request)
+            self.storage.save_turn(
+                state["session_id"],
+                state["round"],
+                "user",
+                f"/evidence request {value}",
+                {"command": "evidence", "action": "request"},
+            )
+            self.storage.save_snapshot(state["session_id"], state)
+            return "已记录 evidence request。\n\n" + self._format_evidence_requests(state)
+
+        if action == "add":
+            if not value:
+                return "用法：/evidence add <text-or-json-object>"
+            items = self._parse_evidence_items(value, source_hint="inline")
+            return self._add_evidence_items(state, items, raw_command=f"/evidence add {value}", source="inline")
+
+        if action == "import":
+            if not value:
+                return "用法：/evidence import <path-to-json-md-or-txt>"
+            path = self._resolve_import_path(value)
+            if not path.exists() or not path.is_file():
+                return f"未找到 evidence 文件：{path}"
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text = path.read_text(encoding="utf-8-sig")
+            items = self._parse_evidence_items(text, source_hint=str(path))
+            return self._add_evidence_items(state, items, raw_command=f"/evidence import {value}", source=str(path))
+
+        return (
+            "用法：/evidence [list|requests] | /evidence add <text-or-json-object> | "
+            "/evidence import <path> | /evidence request <keywords>"
+        )
 
     def cmd_checkpoint(self) -> str:
         state = self._require_state()
@@ -986,6 +1039,17 @@ class Router:
             f"- best_redesign: {state.get('best_redesign') or '暂无'}",
             f"- judge_verdict: {state.get('judge_verdict', 'undecided')}",
             f"- pending_next_question: {state.get('pending_next_question') or '暂无'}",
+            f"- evidence_items_count: {len(state.get('evidence_items') or [])}",
+            f"- evidence_requests_count: {len(state.get('evidence_requests') or [])}",
+            "",
+            "## Evidence Pack",
+            "",
+            self._json_block(
+                {
+                    "evidence_items": state.get("evidence_items") or [],
+                    "evidence_requests": state.get("evidence_requests") or [],
+                }
+            ),
             "",
             "## Major Question History",
             "",
@@ -1126,6 +1190,8 @@ Reason:
         history_count = len(state.get("major_question_history") or [])
         open_questions = state.get("open_questions") or []
         last_open = open_questions[-3:] if open_questions else ["暂无"]
+        evidence_requests = state.get("evidence_requests") or []
+        last_evidence_requests = evidence_requests[-3:] if evidence_requests else ["暂无"]
         return (
             "## Session summary\n"
             f"- session_id: {state.get('session_id')}\n"
@@ -1140,8 +1206,10 @@ Reason:
             f"- judge_verdict: {state.get('judge_verdict')}\n"
             f"- pending_next_question: {state.get('pending_next_question') or '暂无'}\n"
             f"- major_question_history_count: {history_count}\n"
+            f"- evidence_items_count: {len(state.get('evidence_items') or [])}\n"
+            f"- recent_evidence_requests: {json.dumps(last_evidence_requests, ensure_ascii=False)}\n"
             f"- recent_open_questions: {json.dumps(last_open, ensure_ascii=False)}\n"
-            "- useful_commands: /position, /position add <text>, /auto 3, /exec, /spawn <role> <n>, /defend, /build, /judge, /close, /close --force"
+            "- useful_commands: /position, /position add <text>, /evidence, /evidence add <text-or-json>, /auto 3, /exec, /spawn <role> <n>, /defend, /build, /judge, /close, /close --force"
         )
 
     def _format_chair_decision(self, decision: Dict[str, Any]) -> str:
@@ -1159,6 +1227,13 @@ Reason:
 
     def _format_agent_result(self, result: Dict[str, Any]) -> str:
         role = result.get("role", "agent")
+        evidence_requests = result.get("evidence_requests") or (result.get("state_patch") or {}).get("evidence_requests") or []
+        evidence_text = (
+            "\n- evidence_requests: "
+            + json.dumps(evidence_requests, ensure_ascii=False, indent=2)
+            if evidence_requests
+            else ""
+        )
         if role == "merger":
             return (
                 "### Merger result\n"
@@ -1166,6 +1241,7 @@ Reason:
                 "- clone_input: same frozen state + recent turns snapshot\n"
                 f"- strongest_point: {result.get('strongest_point')}\n"
                 f"- merged_points: {json.dumps(result.get('merged_points', []), ensure_ascii=False, indent=2)}"
+                f"{evidence_text}"
             )
 
         if role == "judge":
@@ -1175,6 +1251,7 @@ Reason:
                 f"- confidence: {result.get('confidence')}\n"
                 f"- reasoning: {result.get('reasoning_summary')}\n"
                 f"- next_validation_action: {result.get('next_validation_action')}"
+                f"{evidence_text}"
             )
 
         strongest = (
@@ -1184,7 +1261,7 @@ Reason:
             or result.get("strongest_point")
             or ""
         )
-        return f"### {role} result\n- strongest: {strongest}"
+        return f"### {role} result\n- strongest: {strongest}{evidence_text}"
 
     def _default_clone_tasks(self, role: str, count: int) -> List[Dict[str, str]]:
         angles = {
@@ -1310,6 +1387,204 @@ Reason:
         action = parts[0].lower()
         value = parts[1] if len(parts) > 1 else ""
         return action, value
+
+    def _split_evidence_arg(self, arg: str) -> Tuple[str, str]:
+        arg = (arg or "").strip()
+        if not arg:
+            return "", ""
+        parts = arg.split(maxsplit=1)
+        action = parts[0].lower()
+        value = parts[1] if len(parts) > 1 else ""
+        return action, value
+
+    def _resolve_import_path(self, raw_path: str) -> Path:
+        path = Path(raw_path.strip().strip('"').strip("'"))
+        if not path.is_absolute():
+            path = self.base_dir / path
+        return path.resolve()
+
+    def _parse_evidence_items(self, raw: str, source_hint: str) -> List[Dict[str, Any]]:
+        text = raw.strip()
+        parsed: Any = None
+        if text.startswith(("{", "[")):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+
+        raw_items: List[Any]
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("evidence_items"), list):
+                raw_items = parsed["evidence_items"]
+            elif isinstance(parsed.get("items"), list):
+                raw_items = parsed["items"]
+            else:
+                raw_items = [parsed]
+        elif isinstance(parsed, list):
+            raw_items = parsed
+        else:
+            raw_items = [
+                {
+                    "title": Path(source_hint).name if source_hint != "inline" else "",
+                    "source_type": "note",
+                    "key_quote_or_summary": text,
+                }
+            ]
+
+        return [self._normalize_evidence_item(item, source_hint) for item in raw_items if item not in (None, "", [], {})]
+
+    def _normalize_evidence_item(self, raw: Any, source_hint: str = "") -> Dict[str, Any]:
+        if isinstance(raw, dict):
+            item = dict(raw)
+        else:
+            item = {"key_quote_or_summary": str(raw)}
+
+        summary = (
+            item.get("key_quote_or_summary")
+            or item.get("summary")
+            or item.get("abstract")
+            or item.get("text")
+            or item.get("content")
+            or ""
+        )
+        title = item.get("title") or item.get("name") or ""
+        if not title and source_hint and source_hint != "inline":
+            title = Path(source_hint).name
+
+        normalized = {
+            "source_id": str(item.get("source_id") or f"src-{uuid.uuid4().hex[:8]}"),
+            "title": self._clip_inline_text(str(title or "untitled evidence"), limit=160),
+            "url": self._clip_inline_text(str(item.get("url") or item.get("link") or ""), limit=300),
+            "date": self._clip_inline_text(str(item.get("date") or item.get("year") or ""), limit=40),
+            "source_type": self._normalize_evidence_source_type(item.get("source_type") or item.get("type")),
+            "claim_supported": self._clip_inline_text(str(item.get("claim_supported") or ""), limit=360),
+            "key_quote_or_summary": self._clip_inline_text(str(summary or ""), limit=2000),
+            "reliability": self._normalize_reliability(item.get("reliability")),
+        }
+        return normalized
+
+    def _normalize_evidence_request(self, raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, dict):
+            item = dict(raw)
+        else:
+            item = {"query": str(raw)}
+        query = item.get("query") or item.get("keywords") or item.get("search_query") or item.get("evidence_needed") or ""
+        return {
+            "request_id": str(item.get("request_id") or f"req-{uuid.uuid4().hex[:8]}"),
+            "query": self._clip_inline_text(str(query or ""), limit=240),
+            "reason": self._clip_inline_text(str(item.get("reason") or item.get("why") or ""), limit=360),
+            "source_type": self._normalize_evidence_source_type(item.get("source_type") or item.get("type")),
+            "priority": self._normalize_priority(item.get("priority")),
+            "status": self._clip_inline_text(str(item.get("status") or "open"), limit=40),
+        }
+
+    def _add_evidence_items(
+        self,
+        state: Dict[str, Any],
+        items: List[Dict[str, Any]],
+        raw_command: str,
+        source: str,
+    ) -> str:
+        if not items:
+            return "没有解析到可导入的 evidence item。"
+        state = increment_round(state)
+        existing = state.get("evidence_items") or []
+        for item in items:
+            existing = self._append_unique_state_item(existing, item)
+        state["evidence_items"] = existing
+        state["requires_user_intervention"] = False
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "user",
+            raw_command,
+            {
+                "command": "evidence",
+                "action": "add",
+                "source": source,
+                "items_added": len(items),
+            },
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        return f"已导入 {len(items)} 条 evidence item。\n\n" + self._format_evidence_pack(state)
+
+    def _append_unique_state_item(self, existing: Any, item: Dict[str, Any]) -> List[Dict[str, Any]]:
+        result = list(existing or [])
+        key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        seen = {json.dumps(value, ensure_ascii=False, sort_keys=True) for value in result}
+        if key not in seen:
+            result.append(item)
+        return result[-80:]
+
+    def _normalize_evidence_source_type(self, value: Any) -> str:
+        raw = str(value or "unknown").strip().lower()
+        allowed = {"paper", "docs", "benchmark", "blog", "repo", "web", "note", "unknown"}
+        return raw if raw in allowed else "unknown"
+
+    def _normalize_reliability(self, value: Any) -> str:
+        raw = str(value or "unknown").strip().lower()
+        return raw if raw in {"low", "medium", "high", "unknown"} else "unknown"
+
+    def _normalize_priority(self, value: Any) -> str:
+        raw = str(value or "medium").strip().lower()
+        return raw if raw in {"low", "medium", "high"} else "medium"
+
+    def _format_evidence_pack(self, state: Dict[str, Any]) -> str:
+        items = state.get("evidence_items") or []
+        lines = [
+            "## Evidence pack",
+            f"- evidence_items: {len(items)}",
+            f"- evidence_requests: {len(state.get('evidence_requests') or [])}",
+            "",
+        ]
+        if not items:
+            lines.append("暂无 evidence items。")
+        else:
+            for index, item in enumerate(items[-20:], start=max(1, len(items) - 19)):
+                lines.extend(
+                    [
+                        f"### {index}. {item.get('source_id', '')}",
+                        f"- title: {item.get('title', '')}",
+                        f"- type: {item.get('source_type', 'unknown')}",
+                        f"- url: {item.get('url') or '暂无'}",
+                        f"- reliability: {item.get('reliability', 'unknown')}",
+                        f"- summary: {item.get('key_quote_or_summary') or '暂无'}",
+                        "",
+                    ]
+                )
+        lines.append("可用命令：/evidence add <text-or-json-object>、/evidence import <path>、/evidence requests")
+        return "\n".join(lines).rstrip()
+
+    def _format_evidence_requests(self, state: Dict[str, Any]) -> str:
+        requests = state.get("evidence_requests") or []
+        lines = ["## Evidence requests", f"- count: {len(requests)}", ""]
+        if not requests:
+            lines.append("暂无待检索请求。")
+        else:
+            for index, item in enumerate(requests[-20:], start=max(1, len(requests) - 19)):
+                if isinstance(item, dict):
+                    query = (
+                        item.get("query")
+                        or item.get("keywords")
+                        or item.get("search_query")
+                        or item.get("evidence_needed")
+                        or ""
+                    )
+                    lines.extend(
+                        [
+                            f"### {index}. {item.get('request_id', '')}",
+                            f"- query: {query}",
+                            f"- reason: {item.get('reason') or '暂无'}",
+                            f"- source_type: {item.get('source_type', 'unknown')}",
+                            f"- priority: {item.get('priority', 'medium')}",
+                            f"- status: {item.get('status', 'open')}",
+                            "",
+                        ]
+                    )
+                else:
+                    lines.extend([f"### {index}.", f"- query: {item}", ""])
+        lines.append("可用命令：/evidence request <keywords>、/evidence add <text-or-json-object>、/evidence import <path>")
+        return "\n".join(lines).rstrip()
 
     def _format_user_position(self, state: Dict[str, Any]) -> str:
         return (

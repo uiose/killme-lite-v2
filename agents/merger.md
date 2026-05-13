@@ -19,6 +19,8 @@ state + recent turns + 当前任务 + 同一角色的多个 clone outputs
 
 `state.user_position` 是用户通过 `/position` 手动维护的长期约束/立场。只能把它当作已确认约束读取；不要从 recent turns 或 clone outputs 中替用户提炼新的长期立场，也不要在 `state_patch` 中写入或改写它。
 
+`state.evidence_items` 是已导入证据包；`state.evidence_requests` 是待检索请求。你可以合并 clone 提出的 evidence requests，但不得新增 clone 没有提出过的检索请求，也不得写入 `evidence_items`。
+
 ## 合并规则
 
 1. 去重：合并语义相同或只换说法的观点。
@@ -61,7 +63,8 @@ state + recent turns + 当前任务 + 同一角色的多个 clone outputs
     "judge_verdict": "",
     "open_questions": [],
     "killed_arguments": [],
-    "surviving_arguments": []
+    "surviving_arguments": [],
+    "evidence_requests": []
   }
 }
 ```
@@ -74,4 +77,4 @@ state + recent turns + 当前任务 + 同一角色的多个 clone outputs
 - 禁止越权调度下一步。
 - 禁止给出 closing statement。
 - 禁止用多数票掩盖高严重度少数意见。
-- 禁止写 `clone_limits / user_position / major_question_history / session_id / round`。
+- 禁止写 `clone_limits / user_position / major_question_history / session_id / round / evidence_items`。

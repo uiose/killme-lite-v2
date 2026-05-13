@@ -225,14 +225,26 @@ def mock_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if role == "executioner":
         if "definition" in angle:
             strongest = f"{angle}: 核心概念、成功标准和失败阈值还不够可操作，容易让系统看似在审议，实际无法判断是否变好。"
+            evidence_requests = []
         elif "evidence" in angle:
             strongest = f"{angle}: 目前缺少真实用户愿意持续使用该审议循环的证据，可能只是把一次性 prompt 包装成系统。"
+            evidence_requests = [
+                {
+                    "query": f"{claim} public benchmark baseline evidence",
+                    "reason": "需要外部材料判断当前主张是否已有基线、公开评测或反例。",
+                    "source_type": "web",
+                    "priority": "medium",
+                }
+            ]
         elif "complexity" in angle:
             strongest = f"{angle}: clone、merger、judge 和状态写入会让轻量 MVP 迅速变成复杂 orchestrator。"
+            evidence_requests = []
         elif "workflow" in angle:
             strongest = f"{angle}: 用户可能被太多角色输出打断，反而更难表达真实约束。"
+            evidence_requests = []
         else:
             strongest = f"{angle}: 该方案可能在真实使用场景中缺少可证伪需求证据。"
+            evidence_requests = []
         return {
             "role": "executioner",
             "task_understood": task,
@@ -247,10 +259,12 @@ def mock_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             "strongest_attack": strongest,
             "killed_arguments": ["先做完整平台再验证价值"],
             "open_questions": [f"围绕「{question}」最小可证伪测试是什么？"],
+            "evidence_requests": evidence_requests,
             "state_patch": {
                 "strongest_attack": strongest,
                 "killed_arguments": ["先做完整平台再验证价值"],
                 "open_questions": [f"围绕「{question}」最小可证伪测试是什么？"],
+                "evidence_requests": evidence_requests,
             },
         }
 

@@ -22,6 +22,8 @@ state + recent turns + 当前任务
 
 `state.user_position` 是用户通过 `/position` 手动维护的长期约束/立场。只能把它当作已确认约束读取；不要从 recent turns 中替用户推断新的长期立场，也不要在 `state_patch` 中写入或改写它。
 
+`state.evidence_items` 是已导入证据包；只能基于其中已有资料或输入文本提出事实判断。若当前攻击需要论文、benchmark、repo、文档或网页证据而证据包不足，不要编造事实，在 `evidence_requests` / `state_patch.evidence_requests` 写出 1-3 条检索关键词和理由。
+
 ## 攻击顺序
 
 优先按这些 kill gates 检查。若某一关已经致命，不要继续堆砌次要问题：
@@ -77,15 +79,24 @@ state + recent turns + 当前任务
   "strongest_attack": "",
   "killed_arguments": [],
   "open_questions": [],
+  "evidence_requests": [
+    {
+      "query": "",
+      "reason": "",
+      "source_type": "paper | docs | benchmark | repo | web | unknown",
+      "priority": "low | medium | high"
+    }
+  ],
   "state_patch": {
     "strongest_attack": "",
     "killed_arguments": [],
-    "open_questions": []
+    "open_questions": [],
+    "evidence_requests": []
   }
 }
 ```
 
-`state_patch` 只允许写 `strongest_attack / killed_arguments / open_questions`。
+`state_patch` 只允许写 `strongest_attack / killed_arguments / open_questions / evidence_requests`。不得写入 `evidence_items`；证据只能由用户或主持程序通过 evidence 命令导入。
 
 ## 禁止
 
@@ -95,4 +106,4 @@ state + recent turns + 当前任务
 - 禁止为了攻击而攻击；每个攻击都必须说明为什么重要。
 - 禁止提出大而空的风险词，例如“可能失败”，必须指出失败机制。
 - 禁止把每个问题都转化成“未来可以补充”的轻描淡写。
-- 禁止写 `clone_limits / user_position / major_question_history / session_id / round`。
+- 禁止写 `clone_limits / user_position / major_question_history / session_id / round / evidence_items`。

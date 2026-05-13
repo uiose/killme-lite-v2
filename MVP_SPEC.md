@@ -18,6 +18,11 @@ MVP CLI 支持：
 - `/spawn <role> <count>`：显式手动生成某角色的临时 clones，并由 Merger 合并。必须遵守 `clone_limits`。
 - `/state`：输出当前 shared state JSON。
 - `/summary`：输出当前 session 的简洁摘要。
+- `/evidence`：显示当前 evidence pack 和 evidence requests。
+- `/evidence add <text-or-json-object>`：导入一条证据摘要或结构化 evidence item。
+- `/evidence import <path>`：从本地 JSON / Markdown / 文本文件导入 evidence item。
+- `/evidence requests`：查看角色提出的待检索关键词和理由。
+- `/evidence request <keywords>`：手动记录一条待检索请求。
 - `/checkpoint`：显式保存当前 state snapshot，并返回摘要。
 - `/config <role> <max_clones>`：修改非 Chair 角色的 clone 上限。支持 `executioner / defender / builder / judge`。MVP 最多允许 5，但建议保持 1-3。
 - `/close`：强制 Chair 对当前 major question 输出 closing statement，并写入 `major_question_history`。

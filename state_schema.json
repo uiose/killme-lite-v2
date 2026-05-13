@@ -19,6 +19,8 @@
   "open_questions": [],
   "killed_arguments": [],
   "surviving_arguments": [],
+  "evidence_items": [],
+  "evidence_requests": [],
   "pending_next_question": "",
   "requires_user_intervention": false
 }

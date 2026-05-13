@@ -136,6 +136,14 @@ Chair 提出 major question
 -> 进入下一个 major question
 ```
 
+### Evidence Pack
+
+`evidence_items` 保存用户或外部主持程序导入的证据摘要、论文、benchmark、repo 或文档条目。LLM 角色可以读取 evidence pack，但不能自己写入 `evidence_items`。
+
+当角色发现当前判断需要外部资料时，只能写入 `evidence_requests`，例如检索关键词、需要的来源类型和理由。用户或主持程序据此下载、摘录并用 `/evidence add` 或 `/evidence import` 导入材料。
+
+这个边界故意保留：系统可以意识到“需要检索什么”，但不会把未导入资料伪装成已知事实。
+
 ---
 
 ## 当前实现重点
@@ -357,6 +365,11 @@ KILLME_JSON_RESPONSE_FORMAT=0 uv run python main.py
 /position set <text>
 /position add <text>
 /position clear
+/evidence
+/evidence add <text-or-json-object>
+/evidence import <path>
+/evidence requests
+/evidence request <keywords>
 /checkpoint
 /config <executioner|defender|builder|judge> <max_clones>
 /close
@@ -382,6 +395,11 @@ KILLME_JSON_RESPONSE_FORMAT=0 uv run python main.py
 - `/position set <text>` 手动覆盖 `user_position`；
 - `/position add <text>` 手动合并新的长期约束；
 - `/position clear` 清空回初始立场；
+- `/evidence` 显示当前 evidence pack；
+- `/evidence add <text-or-json-object>` 手动导入一条证据摘要或结构化 evidence item；
+- `/evidence import <path>` 从本地 JSON / Markdown / 文本文件导入 evidence item；
+- `/evidence requests` 显示角色提出的待检索关键词；
+- `/evidence request <keywords>` 手动记录一条待检索请求；
 - `/checkpoint` 保存当前 state snapshot；
 - `/config` 修改非 Chair 角色的 clone 上限；
 - `/close` 需要先有 Judge verdict；

@@ -497,6 +497,11 @@ uv run python main.py --db ./data/real-llm-smoke.sqlite
 | `/position set <text>` | 手动覆盖 `user_position` | 当前长期立场被污染或需要重写 |
 | `/position add <text>` | 手动合并新的长期约束 | 你明确希望后续 Chair 和角色持续参考这条约束 |
 | `/position clear` | 清空回初始立场 | 你想移除已有长期约束 |
+| `/evidence` | 显示当前 evidence pack 和待检索请求数量 | 你想检查当前有哪些外部材料已经进入系统 |
+| `/evidence add <text-or-json-object>` | 导入一条证据摘要或结构化 evidence item | 你已经拿到资料摘要、论文信息、repo 结论或 benchmark 说明 |
+| `/evidence import <path>` | 从本地 JSON / Markdown / 文本文件导入 evidence item | 你或外部主持程序已经下载并整理了资料文件 |
+| `/evidence requests` | 查看角色提出的待检索关键词和理由 | 你准备按系统请求去检索资料 |
+| `/evidence request <keywords>` | 手动记录一条待检索请求 | 你想让后续主持人或外部脚本补这类资料 |
 | `/checkpoint` | 保存当前 state snapshot，并输出摘要 | 重要节点前后想手动留档 |
 | `/close` | 在已有 Judge verdict 后关闭当前 major question | 当前问题已经裁决，准备进入下一问题 |
 | `/close --force` | 未裁决也强制关闭当前 major question | 你明确想跳过裁决，但仍保留关闭记录 |
@@ -513,6 +518,16 @@ uv run python main.py --db ./data/real-llm-smoke.sqlite
 ```text
 /position add 第一阶段不能接真实写 API，只能做离线回放。
 ```
+
+外部证据进入系统走 evidence pack，不让角色凭空声称已经检索过资料：
+
+```text
+/evidence requests
+/evidence add {"title":"ToolBench paper","url":"https://arxiv.org/abs/2307.16789","source_type":"paper","key_quote_or_summary":"ToolBench provides tool-use tasks and solution paths.","reliability":"high"}
+/evidence import doc/toolbench-notes.md
+```
+
+角色如果发现需要外部论文、benchmark、repo 或文档，只能把关键词和理由写入 `evidence_requests`。由你或外部主持程序下载、摘录，再通过 `/evidence add` 或 `/evidence import` 导入。
 
 `/auto <n>` 的 `n` 是调度步数，不是对话轮数。一次调度可能调用一个角色，也可能生成 clones 并触发 Merger。项目故意限制单次最多 3 步，避免早期错误判断被自动放大。
 

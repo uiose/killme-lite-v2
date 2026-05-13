@@ -27,11 +27,20 @@ DEFAULT_STATE = {
     "open_questions": [],
     "killed_arguments": [],
     "surviving_arguments": [],
+    "evidence_items": [],
+    "evidence_requests": [],
     "pending_next_question": "",
     "requires_user_intervention": False,
 }
 
-LIST_FIELDS = {"open_questions", "killed_arguments", "surviving_arguments"}
+LIST_FIELDS = {
+    "open_questions",
+    "killed_arguments",
+    "surviving_arguments",
+    "evidence_items",
+    "evidence_requests",
+}
+PATCH_LIST_FIELDS = {"open_questions", "killed_arguments", "surviving_arguments", "evidence_requests"}
 HISTORY_FIELD = "major_question_history"
 MUTABLE_SCALAR_FIELDS = {
     "chair_mode",
@@ -183,7 +192,7 @@ def apply_state_patch(state: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str,
         return state
 
     for key, value in patch.items():
-        if key in LIST_FIELDS:
+        if key in PATCH_LIST_FIELDS:
             if isinstance(value, list):
                 state[key] = unique_extend(state.get(key, []), value)
             elif value not in (None, ""):
