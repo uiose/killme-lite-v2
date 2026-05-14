@@ -135,3 +135,52 @@ def test_http_errors_do_not_fallback_to_deepseek(tmp_path, monkeypatch):
         client.end_command()
 
     assert calls == ["openai"]
+
+
+def test_call_agent_uses_agent_model_override_on_same_gateway(tmp_path, monkeypatch):
+    (tmp_path / "config.toml").write_text(
+        "\n".join(
+            [
+                'llm_mode = "deepseek"',
+                "",
+                "[model_providers.deepseek]",
+                'base_url = "https://llmapi.paratera.com/v1"',
+                'wire_api = "chat"',
+                'model = "DeepSeek-V4-Pro"',
+                'model_reasoning_effort = "high"',
+                'thinking = "enabled"',
+                "",
+                "[agent_models.defender]",
+                'model = "Kimi-K2.5"',
+                'model_reasoning_effort = "high"',
+                'thinking = "off"',
+                "temperature = 0.4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_urlopen(req, timeout):
+        del timeout
+        calls.append((req.full_url, request_body(req)))
+        return FakeResponse('{"role":"defender","state_patch":{}}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    config = load_config(tmp_path, environ={"DEEPSEEK_API_KEY": "shared-key"})
+    client = LLMClient(ROOT, config=config)
+
+    output = client.call_agent(
+        "defender",
+        state={"core_claim": "x", "current_major_question": "y"},
+        recent_turns=[],
+        current_task="defend",
+    )
+
+    assert output["role"] == "defender"
+    assert calls[0][0] == "https://llmapi.paratera.com/v1/chat/completions"
+    assert calls[0][1]["model"] == "Kimi-K2.5"
+    assert calls[0][1]["temperature"] == 0.4
+    assert calls[0][1]["reasoning_effort"] == "high"
+    assert "thinking" not in calls[0][1]
+    assert client.last_model == "Kimi-K2.5"

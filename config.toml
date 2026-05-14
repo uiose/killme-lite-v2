@@ -7,6 +7,21 @@ model_reasoning_effort = "xhigh"
 llm_mode = "deepseek"
 # `openai` / `deepseek` / `openai_then_deepseek_per_command` |
 
+# Agent model routing is startup-level. Change this in config.toml before
+# launching a session; keeping routing fixed avoids mid-session model drift.
+#
+# - global: legacy behavior; all agents use the active llm_mode provider/model.
+#   * llm_mode="deepseek" => all agents use [model_providers.deepseek].model
+#   * llm_mode="openai" => all agents use [model_providers.openai].model
+# - recommended: built-in role routing through the same gateway/key:
+#   chair=DeepSeek-V4-Pro, executioner=DeepSeek-V4-Pro, defender=Kimi-K2.5,
+#   builder=GLM-5.1, judge=DeepSeek-V4-Pro
+# - custom: use explicit [agent_models.<role>] overrides below.
+
+#####################
+agent_model_profile = "recommended"
+#####################
+
 [model_providers.openai]
 base_url = "https://ojbkapi.com/v1"
 wire_api = "chat"
@@ -17,3 +32,33 @@ wire_api = "chat"
 model = "DeepSeek-V4-Pro"
 model_reasoning_effort = "high"
 thinking = "enabled"
+
+# Optional custom overrides. Set agent_model_profile = "custom" to use these,
+# or keep "recommended" and uncomment only the roles you want to override.
+#
+# [agent_models.chair]
+# model = "DeepSeek-V4-Pro"
+# model_reasoning_effort = "high"
+# thinking = "enabled"
+#
+# [agent_models.executioner]
+# model = "DeepSeek-V4-Pro"
+# model_reasoning_effort = "high"
+# thinking = "enabled"
+#
+# [agent_models.defender]
+# model = "Kimi-K2.5"
+# model_reasoning_effort = "high"
+# thinking = "enabled"
+# temperature = 0.4
+#
+# [agent_models.builder]
+# model = "GLM-5.1"
+# model_reasoning_effort = "medium"
+# thinking = "enabled"
+# temperature = 0.2
+#
+# [agent_models.judge]
+# model = "DeepSeek-V4-Pro"
+# model_reasoning_effort = "high"
+# thinking = "enabled"

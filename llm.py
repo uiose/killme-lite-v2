@@ -32,6 +32,7 @@ class LLMClient:
         self.timeout_seconds = self.config.llm_timeout
         self.progress: Optional[Callable[[str], None]] = None
         self.last_provider: Optional[str] = None
+        self.last_model: Optional[str] = None
         self.last_fallback_used = False
         self._command_active_provider: Optional[str] = None
 
@@ -77,7 +78,8 @@ class LLMClient:
             "important_runtime_rule": runtime_rule,
         }
 
-        if self.force_mock or not self._provider(self._current_provider_name()).api_key:
+        provider = self._agent_provider(role)
+        if self.force_mock or not provider.api_key:
             return mock_agent(role, payload)
 
         prompt = self.load_prompt(role)
@@ -86,7 +88,7 @@ class LLMClient:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
         ]
 
-        raw = self.chat_completion(messages)
+        raw = self.chat_completion(messages, provider=provider)
         parsed = extract_json(raw)
         if not isinstance(parsed, dict):
             raise LLMError(f"Agent {role} did not return a JSON object: {raw[:500]}")
@@ -98,7 +100,14 @@ class LLMClient:
             raise LLMError(f"Prompt not found: {path}")
         return path.read_text(encoding="utf-8")
 
-    def chat_completion(self, messages: List[Dict[str, str]]) -> str:
+    def chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        provider: Optional[ProviderConfig] = None,
+    ) -> str:
+        if provider is not None:
+            return self._chat_completion_with_provider_config(provider, messages)
+
         provider_name = self._current_provider_name()
         try:
             return self._chat_completion_with_provider(provider_name, messages)
@@ -118,6 +127,13 @@ class LLMClient:
         messages: List[Dict[str, str]],
     ) -> str:
         provider = self._provider(provider_name)
+        return self._chat_completion_with_provider_config(provider, messages)
+
+    def _chat_completion_with_provider_config(
+        self,
+        provider: ProviderConfig,
+        messages: List[Dict[str, str]],
+    ) -> str:
         if provider.wire_api != "chat":
             raise LLMError(f"Unsupported wire_api for provider {provider.name}: {provider.wire_api}")
         if not provider.api_key:
@@ -128,13 +144,14 @@ class LLMClient:
             "model": provider.model,
             "messages": messages,
         }
-        if not (provider.name == "deepseek" and provider.thinking == "enabled"):
-            body["temperature"] = 0.2
+        thinking_enabled = provider.thinking == "enabled"
+        if not (provider.name == "deepseek" and thinking_enabled and _is_deepseek_model(provider.model)):
+            body["temperature"] = provider.temperature if provider.temperature is not None else 0.2
         if provider.reasoning_effort:
             body["reasoning_effort"] = provider.reasoning_effort
         if self.use_response_format:
             body["response_format"] = {"type": "json_object"}
-        if provider.name == "deepseek" and provider.thinking in {"enabled", "disabled"}:
+        if provider.thinking in {"enabled", "disabled"} and _is_deepseek_model(provider.model):
             body["thinking"] = {"type": provider.thinking}
 
         req = urllib.request.Request(
@@ -149,6 +166,7 @@ class LLMClient:
         )
 
         self.last_provider = provider.name
+        self.last_model = provider.model
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
                 data = json.loads(response.read().decode("utf-8"))
@@ -185,6 +203,12 @@ class LLMClient:
         except KeyError as exc:
             raise LLMError(f"Unknown provider: {provider_name}") from exc
 
+    def _agent_provider(self, role: str) -> ProviderConfig:
+        configured = self.config.agent_models.get(str(role or "").strip().lower())
+        if configured is not None:
+            return configured
+        return self._provider(self._current_provider_name())
+
     def _should_retry_with_deepseek(self, provider_name: str) -> bool:
         return self.llm_mode == "openai_then_deepseek_per_command" and provider_name == "openai"
 
@@ -198,6 +222,10 @@ def _is_timeout_reason(reason: Any) -> bool:
         return True
     lowered = str(reason).lower()
     return "timed out" in lowered or "timeout" in lowered
+
+
+def _is_deepseek_model(model: str) -> bool:
+    return "deepseek" in str(model or "").strip().lower()
 
 
 def extract_json(text: str) -> Any:

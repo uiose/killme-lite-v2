@@ -8,6 +8,17 @@ llm_timeout = 120
 # openai | deepseek | openai_then_deepseek_per_command
 llm_mode = "openai"
 
+# Startup-level agent routing: global | recommended | custom
+# Change this in config.toml before launching a session; keeping routing fixed
+# avoids mid-session model drift.
+# global keeps the old single-model behavior.
+# recommended uses role routing when your gateway can serve these model names:
+#   chair/executioner/judge -> DeepSeek-V4-Pro
+#   defender -> Kimi-K2.5
+#   builder -> GLM-5.1
+# custom uses [agent_models.<role>] overrides.
+agent_model_profile = "global"
+
 [model_providers.openai]
 base_url = "https://api.openai.com/v1"
 wire_api = "chat"
@@ -18,3 +29,34 @@ wire_api = "chat"
 model = "deepseek-v4-pro"
 model_reasoning_effort = "high"
 thinking = "enabled"
+
+# Example custom routing through the same deepseek/paratera-compatible gateway:
+#
+# agent_model_profile = "custom"
+#
+# [agent_models.chair]
+# model = "DeepSeek-V4-Pro"
+# model_reasoning_effort = "high"
+# thinking = "enabled"
+#
+# [agent_models.executioner]
+# model = "DeepSeek-V4-Pro"
+# model_reasoning_effort = "high"
+# thinking = "enabled"
+#
+# [agent_models.defender]
+# model = "Kimi-K2.5"
+# model_reasoning_effort = "high"
+# thinking = "off"
+# temperature = 0.4
+#
+# [agent_models.builder]
+# model = "GLM-5.1"
+# model_reasoning_effort = "medium"
+# thinking = "off"
+# temperature = 0.2
+#
+# [agent_models.judge]
+# model = "DeepSeek-V4-Pro"
+# model_reasoning_effort = "high"
+# thinking = "enabled"

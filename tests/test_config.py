@@ -77,6 +77,75 @@ def test_codex_style_config_toml_can_be_loaded(tmp_path):
     assert config.model_providers["deepseek"].model == "deepseek-v4-pro"
     assert config.model_providers["deepseek"].reasoning_effort == "high"
     assert config.model_providers["deepseek"].thinking == "enabled"
+    assert config.agent_model_profile == "global"
+    assert config.agent_models == {}
+
+
+def test_recommended_agent_model_profile_uses_shared_gateway(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        "\n".join(
+            [
+                'llm_mode = "deepseek"',
+                'agent_model_profile = "recommended"',
+                "",
+                "[model_providers.deepseek]",
+                'base_url = "https://llmapi.paratera.com/v1"',
+                'wire_api = "chat"',
+                'model = "DeepSeek-V4-Pro"',
+                'model_reasoning_effort = "high"',
+                'thinking = "enabled"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(
+        tmp_path,
+        environ={"DEEPSEEK_API_KEY": "one-key-for-all-models"},
+    )
+
+    assert config.agent_model_profile == "recommended"
+    assert config.agent_models["chair"].model == "DeepSeek-V4-Pro"
+    assert config.agent_models["executioner"].model == "DeepSeek-V4-Pro"
+    assert config.agent_models["defender"].model == "Kimi-K2.5"
+    assert config.agent_models["defender"].api_key == "one-key-for-all-models"
+    assert config.agent_models["defender"].base_url == "https://llmapi.paratera.com/v1"
+    assert config.agent_models["defender"].thinking == ""
+    assert config.agent_models["defender"].temperature == 0.4
+    assert config.agent_models["builder"].model == "GLM-5.1"
+    assert config.agent_models["builder"].thinking == ""
+    assert config.agent_models["judge"].model == "DeepSeek-V4-Pro"
+    assert config.agent_models["judge"].thinking == "enabled"
+
+
+def test_custom_agent_model_overrides_recommended_profile(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        "\n".join(
+            [
+                'llm_mode = "deepseek"',
+                'agent_model_profile = "recommended"',
+                "",
+                "[model_providers.deepseek]",
+                'base_url = "https://llmapi.paratera.com/v1"',
+                'wire_api = "chat"',
+                'model = "DeepSeek-V4-Pro"',
+                'thinking = "enabled"',
+                "",
+                "[agent_models.builder]",
+                'model = "Qwen3.5-Plus"',
+                'thinking = "off"',
+                "temperature = 0.3",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, environ={"DEEPSEEK_API_KEY": "test-key"})
+
+    assert config.agent_models["builder"].model == "Qwen3.5-Plus"
+    assert config.agent_models["builder"].thinking == ""
+    assert config.agent_models["builder"].temperature == 0.3
+    assert config.agent_models["defender"].model == "Kimi-K2.5"
 
 
 def test_process_env_overrides_config_toml(tmp_path):
