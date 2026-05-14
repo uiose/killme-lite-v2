@@ -25,6 +25,7 @@ VERDICT_TIEBREAK = {
     "BUILD": 1,
     "undecided": 0,
 }
+EXPLORATION_LIST_FIELDS = ("hypotheses", "research_threads", "findings", "coverage_gaps")
 
 
 def _nonempty(values: Iterable[Any]) -> List[Any]:
@@ -83,6 +84,7 @@ def _collect_structured_points(role: str, outputs: List[Dict[str, Any]]) -> List
     for output_index, output in enumerate(outputs):
         if not isinstance(output, dict):
             continue
+        _append_exploration_items(points, output, role, output_index)
         if role == "executioner":
             _append_items(
                 points,
@@ -128,6 +130,16 @@ def _collect_structured_points(role: str, outputs: List[Dict[str, Any]]) -> List
                     )
                 )
     return [point for point in points if point["claim"]]
+
+
+def _append_exploration_items(
+    points: List[Dict[str, Any]],
+    output: Dict[str, Any],
+    role: str,
+    output_index: int,
+) -> None:
+    for field in EXPLORATION_LIST_FIELDS:
+        _append_items(points, output.get(field), role=role, output_index=output_index)
 
 
 def _append_items(
@@ -268,25 +280,60 @@ def _build_state_patch(
         "evidence_requests": [],
     }
 
-    for item in patches:
-        if not isinstance(item, dict):
-            continue
-        for list_field in ("open_questions", "killed_arguments", "surviving_arguments", "evidence_requests"):
-            value = item.get(list_field, [])
-            if isinstance(value, list):
-                patch[list_field].extend(value)
-            elif value not in (None, ""):
-                patch[list_field].append(value)
+    list_fields = (
+        "open_questions",
+        "killed_arguments",
+        "surviving_arguments",
+        "evidence_requests",
+        *EXPLORATION_LIST_FIELDS,
+    )
 
-    for list_field in ("open_questions", "killed_arguments", "surviving_arguments", "evidence_requests"):
+    def append_list_value(list_field: str, value: Any) -> None:
+        if list_field not in patch:
+            patch[list_field] = []
+        if isinstance(value, list):
+            patch[list_field].extend(value)
+        elif value not in (None, "", [], {}):
+            patch[list_field].append(value)
+
+    for output in outputs:
+        if not isinstance(output, dict):
+            continue
+        output_patch = output.get("state_patch", {})
+        if not isinstance(output_patch, dict):
+            output_patch = {}
+        for list_field in list_fields:
+            # Preserve clone order: direct reported discoveries first, then any
+            # explicit state_patch items from the same clone. Deduping below
+            # removes repeated wrapper copies without reordering discoveries.
+            append_list_value(list_field, output.get(list_field, []))
+            append_list_value(list_field, output_patch.get(list_field, []))
+
+    if not outputs:
+        for item in patches:
+            if not isinstance(item, dict):
+                continue
+            for list_field in list_fields:
+                append_list_value(list_field, item.get(list_field, []))
+
+    for list_field in (
+        "open_questions",
+        "killed_arguments",
+        "surviving_arguments",
+        "evidence_requests",
+        *EXPLORATION_LIST_FIELDS,
+    ):
+        if list_field not in patch:
+            patch[list_field] = []
         patch[list_field], _ = _dedupe_with_removed(patch[list_field])
 
     strongest = points[0]["claim"] if points else ""
-    if role == "executioner" and strongest:
+    exploration_mode = str(state.get("agenda_mode") or "decision") == "exploration"
+    if not exploration_mode and role == "executioner" and strongest:
         patch["strongest_attack"] = strongest
-    elif role == "defender" and strongest:
+    elif not exploration_mode and role == "defender" and strongest:
         patch["strongest_defense"] = strongest
-    elif role == "builder" and strongest:
+    elif not exploration_mode and role == "builder" and strongest:
         patch["best_redesign"] = strongest
     elif role == "judge":
         verdict = _choose_verdict(points, outputs)
@@ -301,6 +348,10 @@ def _build_state_patch(
             "killed_arguments": [],
             "surviving_arguments": [],
             "evidence_requests": [],
+            "hypotheses": [],
+            "research_threads": [],
+            "findings": [],
+            "coverage_gaps": [],
         },
         patch,
     )
@@ -313,6 +364,10 @@ def _build_state_patch(
         "killed_arguments",
         "surviving_arguments",
         "evidence_requests",
+        "hypotheses",
+        "research_threads",
+        "findings",
+        "coverage_gaps",
     }
     return {key: value for key, value in clean_patch.items() if key in allowed}
 

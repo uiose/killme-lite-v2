@@ -13,6 +13,7 @@
 + 可克隆的非 Chair 角色
 + shared state
 + major question 生命周期
++ decision / exploration 双议程模式
 + 本地 SQLite 持久化
 + prompt files
 + OpenAI-compatible LLM API
@@ -40,6 +41,7 @@ Judge 说一段。
 - 最强的诚实辩护是什么？
 - 最小可测试版本是什么？
 - 应该 `KILL`、`REDESIGN`、`TEST` 还是 `BUILD`？
+- 如果问题还太开放，如何先扫描资料、生成多假设和保存研究空间？
 - 经过 10-20 轮后，系统还能不能保持上下文清楚？
 
 ---
@@ -136,6 +138,26 @@ Chair 提出 major question
 -> 进入下一个 major question
 ```
 
+### Exploration Mode
+
+开放探究性问题不一定已经适合裁决。`/explore <question>` 会创建 `agenda_mode = exploration` 的 session：
+
+```text
+/explore killme-lite 的议程机制如何支持开放探索型研究问题
+```
+
+Exploration mode 不自动调用 Judge，也不自动输出 `KILL / REDESIGN / TEST / BUILD`。它维护一张探索地图：
+
+| 字段 | 用途 |
+|---|---|
+| `exploration_focus` | 当前开放探究主题 |
+| `hypotheses` | 多个竞争性假设或解释 |
+| `research_threads` | 资料、概念、反例、基线等线索 |
+| `findings` | 阶段性发现，不等于 verdict |
+| `coverage_gaps` | 尚未扫描的覆盖缺口 |
+
+当某条线索足够具体时，使用 `/mode decision` 把它转成可裁决节点。详见 `EXPLORATION_MODE.md`。
+
 ### Evidence Pack
 
 `evidence_items` 保存用户或外部主持程序导入的证据摘要、论文、benchmark、repo 或文档条目。LLM 角色可以读取 evidence pack，但不能自己写入 `evidence_items`。
@@ -189,6 +211,7 @@ killme-lite/
   tests/
     test_config.py
     test_validation.py
+    test_exploration_mode.py
     test_merger.py
     test_core_flow.py
     test_clone_failure.py

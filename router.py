@@ -73,11 +73,17 @@ class Router:
         if command == "/start":
             return self.cmd_start(arg)
 
+        if command == "/explore":
+            return self.cmd_explore(arg)
+
         if command == "/auto":
             return self.cmd_auto(arg)
 
         if command == "/manual":
             return self.cmd_manual()
+
+        if command == "/mode":
+            return self.cmd_mode(arg)
 
         if command in ROLE_COMMANDS:
             return self.cmd_role(ROLE_COMMANDS[command])
@@ -129,7 +135,7 @@ class Router:
         if not idea:
             return "用法：/start <idea>"
 
-        state = new_state(self.base_dir, idea)
+        state = new_state(self.base_dir, idea, agenda_mode="decision")
         self.storage.create_session(state["session_id"], title=idea[:80])
         self.storage.set_active_session_id(state["session_id"])
         self.storage.save_turn(state["session_id"], state["round"], "user", f"/start {idea}")
@@ -137,11 +143,33 @@ class Router:
         self.storage.save_snapshot(state["session_id"], state)
 
         return (
-            f"已创建 session：{state['session_id']}\n"
+            f"已创建 decision session：{state['session_id']}\n"
             f"Core claim：{state['core_claim']}\n"
+            f"Agenda mode：{state['agenda_mode']}\n"
             f"Current major question：{state['current_major_question']}\n"
             f"Question source：{question_source}\n"
-            f"建议下一步：/auto {AUTO_MAX_STEPS} 或 /exec"
+            f"建议下一步：/auto {AUTO_MAX_STEPS} 或 /exec；开放探究请用 /explore <question>"
+        )
+
+    def cmd_explore(self, question: str) -> str:
+        question = question.strip()
+        if not question:
+            return "用法：/explore <open-ended question>"
+
+        state = new_state(self.base_dir, question, agenda_mode="exploration")
+        self.storage.create_session(state["session_id"], title=question[:80])
+        self.storage.set_active_session_id(state["session_id"])
+        self.storage.save_turn(state["session_id"], state["round"], "user", f"/explore {question}")
+        state, question_source = self._bootstrap_initial_major_question(state)
+        self.storage.save_snapshot(state["session_id"], state)
+
+        return (
+            f"已创建 exploration session：{state['session_id']}\n"
+            f"Exploration focus：{state.get('exploration_focus') or state['core_claim']}\n"
+            f"Agenda mode：{state['agenda_mode']}\n"
+            f"Exploration frame：{state['current_major_question']}\n"
+            f"Frame source：{question_source}\n"
+            f"建议下一步：/auto {AUTO_MAX_STEPS}、/spawn defender 2 或 /evidence request <keywords>"
         )
 
     def cmd_auto(self, arg: str) -> str:
@@ -205,6 +233,47 @@ class Router:
         self._save_state(state)
         return "已切换到 manual mode。Chair 不会擅自连续推进。"
 
+    def cmd_mode(self, arg: str = "") -> str:
+        state = self._require_state()
+        value = arg.strip().lower()
+        aliases = {
+            "explore": "exploration",
+            "exploratory": "exploration",
+            "research": "exploration",
+            "探索": "exploration",
+            "探究": "exploration",
+            "decide": "decision",
+            "decision-node": "decision",
+            "决策": "decision",
+            "裁决": "decision",
+        }
+        value = aliases.get(value, value)
+        if not value:
+            return (
+                "## Mode\n"
+                f"- agenda_mode: {state.get('agenda_mode', 'decision')}\n"
+                f"- chair_mode: {state.get('chair_mode', 'manual')}\n\n"
+                "用法：/mode exploration 或 /mode decision"
+            )
+        if value not in {"decision", "exploration"}:
+            return "用法：/mode exploration 或 /mode decision"
+
+        previous = state.get("agenda_mode", "decision")
+        state = increment_round(state)
+        state["agenda_mode"] = value
+        state["requires_user_intervention"] = True
+        if value == "exploration" and not state.get("exploration_focus"):
+            state["exploration_focus"] = state.get("core_claim", "")
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "user",
+            f"/mode {value}",
+            {"command": "mode", "previous_agenda_mode": previous, "agenda_mode": value},
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        return f"已切换 agenda_mode：{previous} -> {value}。当前 Chair 会等待用户下一步。"
+
     def cmd_role(self, role: str) -> str:
         result, updated = self._run_role(
             role,
@@ -238,7 +307,7 @@ class Router:
         if count > limit:
             return f"{role} 当前 clone 上限是 {limit}。请先用 /config {role} {count} 调整上限。"
 
-        clone_tasks = self._default_clone_tasks(role, count)
+        clone_tasks = self._default_clone_tasks(role, count, state.get("agenda_mode"))
         result, updated = self._run_role(
             role,
             task=f"Manual command: spawn {count} {role} clone(s)",
@@ -558,6 +627,20 @@ class Router:
         self.storage.save_snapshot(state["session_id"], state)
 
         decision_type = decision["decision_type"]
+        if state.get("agenda_mode") == "exploration" and decision_type in {"judge", "close_question"}:
+            decision_type = "wait_user"
+            decision["decision_type"] = "wait_user"
+            decision["role_to_call"] = None
+            decision["clone_count"] = 0
+            decision["reason"] = (
+                "exploration mode blocks automatic judge/close; keep the map open until the user "
+                "explicitly switches to /mode decision or runs /close for a synthesis."
+            )
+            decision["message_to_user"] = (
+                "探索模式不会自动裁决或关闭。可以继续 /auto、补 evidence，"
+                "或用 /mode decision 把某条线索转成可裁决节点。"
+            )
+
         self._progress(f"auto step {auto_step}: Chair decided {decision_type}")
         self._emit_chair_decision(decision)
         if decision_type == "wait_user":
@@ -581,7 +664,7 @@ class Router:
             requested = int(decision.get("clone_count") or 1)
             count = max(1, min(requested, limit))
             clone_tasks = sanitize_clone_tasks(
-                decision.get("clone_tasks") or self._default_clone_tasks(role, count),
+                decision.get("clone_tasks") or self._default_clone_tasks(role, count, state.get("agenda_mode")),
                 role,
                 count,
             )
@@ -734,7 +817,12 @@ class Router:
                 "chair",
                 state=state,
                 recent_turns=recent,
-                current_task="Produce closing statement for current major question.",
+                current_task=(
+                    "Produce exploration synthesis for current exploration frame. "
+                    "Do not give a KILL/REDESIGN/TEST/BUILD verdict."
+                    if state.get("agenda_mode") == "exploration"
+                    else "Produce closing statement for current major question."
+                ),
             )
             decision = validate_chair_decision(raw_decision, state)
         else:
@@ -767,17 +855,31 @@ class Router:
         return closing, state
 
     def _needs_judge_before_close(self, state: Dict[str, Any]) -> bool:
-        return ensure_shape(state).get("judge_verdict") == "undecided"
+        state = ensure_shape(state)
+        if state.get("agenda_mode") == "exploration":
+            return False
+        return state.get("judge_verdict") == "undecided"
 
     def _bootstrap_initial_major_question(self, state: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
-        task = (
-            "Bootstrap initial major question for a new session. "
-            "Generate exactly one topic-specific current_major_question from state.core_claim. "
-            "Do not call any role, do not attack, defend, judge, or close. "
-            "The question must clarify definitions, boundaries, success/failure criteria, "
-            "or the smallest falsifiable scenario."
-        )
-        fallback_question = self._fallback_initial_major_question(state.get("core_claim", ""))
+        agenda_mode = state.get("agenda_mode", "decision")
+        if agenda_mode == "exploration":
+            task = (
+                "Bootstrap initial exploration frame for a new exploration session. "
+                "Generate exactly one topic-specific current_major_question from state.core_claim, "
+                "but treat it as an exploration frame, not a decision node. "
+                "Do not call any role, do not attack, defend, judge, close, or force a verdict. "
+                "The frame must preserve multiple hypotheses, source-discovery paths, adjacent concepts, "
+                "and open unknowns without reducing the question to yes/no feasibility."
+            )
+        else:
+            task = (
+                "Bootstrap initial major question for a new decision session. "
+                "Generate exactly one topic-specific current_major_question from state.core_claim. "
+                "Do not call any role, do not attack, defend, judge, or close. "
+                "The question must clarify definitions, boundaries, success/failure criteria, "
+                "or the smallest falsifiable scenario."
+            )
+        fallback_question = self._fallback_initial_major_question(state.get("core_claim", ""), agenda_mode)
         question = fallback_question
         source = "fallback"
         metadata: Dict[str, Any] = {"type": "initial_major_question", "source": source}
@@ -787,7 +889,10 @@ class Router:
         }
 
         try:
-            self._progress("start: asking Chair to generate the initial major question")
+            if agenda_mode == "exploration":
+                self._progress("start: asking Chair to generate the initial exploration frame")
+            else:
+                self._progress("start: asking Chair to generate the initial major question")
             raw_decision = self.llm.call_agent(
                 "chair",
                 state=state,
@@ -801,13 +906,16 @@ class Router:
             if candidate:
                 question = candidate
                 source = "chair"
+                state = apply_state_patch(state, decision.get("state_patch", {}))
                 metadata = {
-                    "type": "initial_major_question",
+                    "type": "initial_exploration_frame" if agenda_mode == "exploration" else "initial_major_question",
                     "source": source,
+                    "agenda_mode": agenda_mode,
                     "validation_warnings": decision.get("validation_warnings") or [],
                 }
                 content = {
                     "current_major_question": question,
+                    "exploration_focus": state.get("exploration_focus", ""),
                     "reason": decision.get("reason") or "",
                     "message_to_user": decision.get("message_to_user") or "",
                 }
@@ -826,14 +934,17 @@ class Router:
             json.dumps(content, ensure_ascii=False, indent=2),
             metadata,
         )
+        frame_label = "initial exploration frame" if agenda_mode == "exploration" else "initial major question"
         if source == "chair":
-            self._emit_inline("chair", f"initial major question: {question}")
+            self._emit_inline("chair", f"{frame_label}: {question}")
         else:
-            self._emit_inline("chair", f"fallback initial major question: {question}")
+            self._emit_inline("chair", f"fallback {frame_label}: {question}")
         return state, source
 
-    def _fallback_initial_major_question(self, idea: str) -> str:
+    def _fallback_initial_major_question(self, idea: str, agenda_mode: str = "decision") -> str:
         idea = self._clip_inline_text(idea.strip() or "这个想法", limit=80)
+        if agenda_mode == "exploration":
+            return f"围绕「{idea}」，先展开哪些定义、相邻问题、竞争性假设和资料路径，才能避免过早收敛？"
         return f"围绕「{idea}」，最需要先澄清的核心定义、适用边界和可证伪标准是什么？"
 
     def _is_contextual_question(self, text: str) -> bool:
@@ -1031,7 +1142,9 @@ class Router:
             "## Latest State",
             "",
             f"- round: {state.get('round', 0)}",
+            f"- agenda_mode: {state.get('agenda_mode', 'decision')}",
             f"- core_claim: {state.get('core_claim', '')}",
+            f"- exploration_focus: {state.get('exploration_focus') or '暂无'}",
             f"- current_major_question: {state.get('current_major_question', '')}",
             f"- user_position: {state.get('user_position', '')}",
             f"- strongest_attack: {state.get('strongest_attack') or '暂无'}",
@@ -1041,6 +1154,17 @@ class Router:
             f"- pending_next_question: {state.get('pending_next_question') or '暂无'}",
             f"- evidence_items_count: {len(state.get('evidence_items') or [])}",
             f"- evidence_requests_count: {len(state.get('evidence_requests') or [])}",
+            "",
+            "## Exploration Map",
+            "",
+            self._json_block(
+                {
+                    "hypotheses": state.get("hypotheses") or [],
+                    "research_threads": state.get("research_threads") or [],
+                    "findings": state.get("findings") or [],
+                    "coverage_gaps": state.get("coverage_gaps") or [],
+                }
+            ),
             "",
             "## Evidence Pack",
             "",
@@ -1155,6 +1279,39 @@ class Router:
         return "当前 Judge 还未裁决。请先运行 /judge，或使用 /close --force 强制关闭。"
 
     def _fallback_closing_statement(self, state: Dict[str, Any]) -> str:
+        if state.get("agenda_mode") == "exploration":
+            return f"""## Chair exploration synthesis
+
+Exploration frame:
+{state.get('current_major_question', '')}
+
+Exploration focus:
+{state.get('exploration_focus') or state.get('core_claim', '')}
+
+Hypotheses preserved:
+{'; '.join(state.get('hypotheses') or ['尚未形成明确竞争性假设。'])}
+
+Research threads:
+{'; '.join(state.get('research_threads') or ['尚未形成明确研究线索。'])}
+
+Findings so far:
+{'; '.join(state.get('findings') or ['尚未导入或沉淀明确发现。'])}
+
+Coverage gaps:
+{'; '.join(state.get('coverage_gaps') or ['尚未记录覆盖缺口。'])}
+
+Evidence requests:
+{json.dumps(state.get('evidence_requests') or [], ensure_ascii=False, indent=2)}
+
+Candidate decision nodes:
+{'; '.join(state.get('open_questions') or ['从上述假设中选择一条，切换 /mode decision 后再裁决。'])}
+
+Mode recommendation:
+MANUAL
+
+Reason:
+这是探索综合，不是 verdict。下一步应补资料、选择研究线索，或把某条线索转成 decision node。"""
+
         return f"""## Chair closing statement
 
 Major question:
@@ -1192,11 +1349,26 @@ Reason:
         last_open = open_questions[-3:] if open_questions else ["暂无"]
         evidence_requests = state.get("evidence_requests") or []
         last_evidence_requests = evidence_requests[-3:] if evidence_requests else ["暂无"]
+        hypotheses = state.get("hypotheses") or []
+        threads = state.get("research_threads") or []
+        findings = state.get("findings") or []
+        gaps = state.get("coverage_gaps") or []
+        exploration_lines = ""
+        if state.get("agenda_mode") == "exploration":
+            exploration_lines = (
+                "## Exploration map\n"
+                f"- exploration_focus: {state.get('exploration_focus') or state.get('core_claim')}\n"
+                f"- recent_hypotheses: {json.dumps(hypotheses[-3:] if hypotheses else ['暂无'], ensure_ascii=False)}\n"
+                f"- recent_research_threads: {json.dumps(threads[-3:] if threads else ['暂无'], ensure_ascii=False)}\n"
+                f"- recent_findings: {json.dumps(findings[-3:] if findings else ['暂无'], ensure_ascii=False)}\n"
+                f"- recent_coverage_gaps: {json.dumps(gaps[-3:] if gaps else ['暂无'], ensure_ascii=False)}\n"
+            )
         return (
             "## Session summary\n"
             f"- session_id: {state.get('session_id')}\n"
             f"- round: {state.get('round')}\n"
-            f"- mode: {state.get('chair_mode')}\n"
+            f"- chair_mode: {state.get('chair_mode')}\n"
+            f"- agenda_mode: {state.get('agenda_mode', 'decision')}\n"
             f"- core_claim: {state.get('core_claim')}\n"
             f"- current_major_question: {state.get('current_major_question')}\n"
             f"- user_position: {state.get('user_position')}\n"
@@ -1209,7 +1381,8 @@ Reason:
             f"- evidence_items_count: {len(state.get('evidence_items') or [])}\n"
             f"- recent_evidence_requests: {json.dumps(last_evidence_requests, ensure_ascii=False)}\n"
             f"- recent_open_questions: {json.dumps(last_open, ensure_ascii=False)}\n"
-            "- useful_commands: /position, /position add <text>, /evidence, /evidence add <text-or-json>, /auto 3, /exec, /spawn <role> <n>, /defend, /build, /judge, /close, /close --force"
+            f"{exploration_lines}"
+            "- useful_commands: /mode, /explore <question>, /position, /position add <text>, /evidence, /evidence add <text-or-json>, /auto 3, /exec, /spawn <role> <n>, /defend, /build, /judge, /close, /close --force"
         )
 
     def _format_chair_decision(self, decision: Dict[str, Any]) -> str:
@@ -1234,6 +1407,18 @@ Reason:
             if evidence_requests
             else ""
         )
+        state_patch = result.get("state_patch") or {}
+        exploration_payload = {}
+        for key in ("hypotheses", "research_threads", "findings", "coverage_gaps"):
+            value = result.get(key) or state_patch.get(key)
+            if value:
+                exploration_payload[key] = value
+        exploration_text = (
+            "\n- exploration_updates: "
+            + json.dumps(exploration_payload, ensure_ascii=False, indent=2)
+            if exploration_payload
+            else ""
+        )
         if role == "merger":
             return (
                 "### Merger result\n"
@@ -1242,6 +1427,7 @@ Reason:
                 f"- strongest_point: {result.get('strongest_point')}\n"
                 f"- merged_points: {json.dumps(result.get('merged_points', []), ensure_ascii=False, indent=2)}"
                 f"{evidence_text}"
+                f"{exploration_text}"
             )
 
         if role == "judge":
@@ -1252,6 +1438,7 @@ Reason:
                 f"- reasoning: {result.get('reasoning_summary')}\n"
                 f"- next_validation_action: {result.get('next_validation_action')}"
                 f"{evidence_text}"
+                f"{exploration_text}"
             )
 
         strongest = (
@@ -1261,33 +1448,63 @@ Reason:
             or result.get("strongest_point")
             or ""
         )
-        return f"### {role} result\n- strongest: {strongest}{evidence_text}"
+        return f"### {role} result\n- strongest: {strongest}{evidence_text}{exploration_text}"
 
-    def _default_clone_tasks(self, role: str, count: int) -> List[Dict[str, str]]:
-        angles = {
-            "executioner": [
-                "attack definition ambiguity",
-                "attack evidence gap",
-                "attack execution complexity",
-            ],
-            "defender": [
-                "defend from user value",
-                "defend from minimal MVP feasibility",
-            ],
-            "builder": [
-                "design the lightest MVP",
-                "design the smallest falsifiable test",
-            ],
-            "judge": [
-                "judge product value",
-                "judge implementation complexity",
-            ],
-        }.get(role, ["single instance"])
+    def _default_clone_tasks(
+        self,
+        role: str,
+        count: int,
+        agenda_mode: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        if agenda_mode == "exploration":
+            angles = {
+                "executioner": [
+                    "scan premature closure and false dichotomies",
+                    "map missing evidence and source blind spots",
+                    "surface underexplored counter-hypotheses",
+                ],
+                "defender": [
+                    "generate plausible competing hypotheses",
+                    "connect adjacent concepts and literatures",
+                    "charitably expand possible mechanisms",
+                ],
+                "builder": [
+                    "design source discovery plan",
+                    "design research space scan",
+                    "turn unknowns into next probes",
+                ],
+                "judge": [
+                    "assess readiness to convert into decision node",
+                    "identify what remains too open to judge",
+                ],
+            }.get(role, ["single exploratory angle"])
+            task_prefix = "Explore current frame from angle"
+        else:
+            angles = {
+                "executioner": [
+                    "attack definition ambiguity",
+                    "attack evidence gap",
+                    "attack execution complexity",
+                ],
+                "defender": [
+                    "defend from user value",
+                    "defend from minimal MVP feasibility",
+                ],
+                "builder": [
+                    "design the lightest MVP",
+                    "design the smallest falsifiable test",
+                ],
+                "judge": [
+                    "judge product value",
+                    "judge implementation complexity",
+                ],
+            }.get(role, ["single instance"])
+            task_prefix = "Evaluate current major question from angle"
         return [
             {
                 "name": f"{role.capitalize()}-{i + 1}",
                 "angle": angles[i % len(angles)],
-                "task": f"Evaluate current major question from angle: {angles[i % len(angles)]}",
+                "task": f"{task_prefix}: {angles[i % len(angles)]}",
             }
             for i in range(count)
         ]

@@ -21,6 +21,16 @@ state + recent turns + 当前任务 + 同一角色的多个 clone outputs
 
 `state.evidence_items` 是已导入证据包；`state.evidence_requests` 是待检索请求。你可以合并 clone 提出的 evidence requests，但不得新增 clone 没有提出过的检索请求，也不得写入 `evidence_items`。
 
+## Exploration Mode 合并规则
+
+当 `state.agenda_mode = exploration` 时，合并目标不是选出唯一 strongest point，而是保留高价值多样性：
+
+- 合并 `hypotheses / research_threads / findings / coverage_gaps / evidence_requests`。
+- 不要因为多数 clone 相似就删除少数但重要的反例、术语边界或相邻领域。
+- `strongest_point` 可以记录当前最值得继续追踪的线索，但不得覆盖探索地图。
+- 不要写 `judge_verdict`，不要把多个开放线索强行收束成 verdict。
+- 如果 clone 输出暗含“可以转成 decision node”，把它写入 `open_questions`，等待用户选择。
+
 ## 合并规则
 
 1. 去重：合并语义相同或只换说法的观点。
@@ -64,6 +74,10 @@ state + recent turns + 当前任务 + 同一角色的多个 clone outputs
     "open_questions": [],
     "killed_arguments": [],
     "surviving_arguments": [],
+    "hypotheses": [],
+    "research_threads": [],
+    "findings": [],
+    "coverage_gaps": [],
     "evidence_requests": []
   }
 }
@@ -76,5 +90,6 @@ state + recent turns + 当前任务 + 同一角色的多个 clone outputs
 - 禁止替用户发言。
 - 禁止越权调度下一步。
 - 禁止给出 closing statement。
+- 禁止在 exploration 模式把多条线索合并成单一 verdict 或覆盖探索地图。
 - 禁止用多数票掩盖高严重度少数意见。
 - 禁止写 `clone_limits / user_position / major_question_history / session_id / round / evidence_items`。

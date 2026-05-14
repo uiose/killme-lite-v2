@@ -222,6 +222,9 @@ def mock_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if role == "chair":
         return mock_chair(state, task)
 
+    if state.get("agenda_mode") == "exploration":
+        return mock_exploration_agent(role, payload)
+
     if role == "executioner":
         if "definition" in angle:
             strongest = f"{angle}: 核心概念、成功标准和失败阈值还不够可操作，容易让系统看似在审议，实际无法判断是否变好。"
@@ -347,22 +350,154 @@ def mock_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     raise LLMError(f"Unknown role: {role}")
 
 
+def mock_exploration_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    state = payload.get("state", {})
+    task = payload.get("current_task") or ""
+    angle = payload.get("angle") or "exploratory angle"
+    focus = state.get("exploration_focus") or state.get("core_claim") or "这个开放问题"
+    question = state.get("current_major_question") or focus
+
+    if role == "executioner":
+        gap = f"{angle}: 当前探索容易把「{focus}」过早化约成单一可裁决问题，缺少反例、相邻领域和术语边界扫描。"
+        thread = f"沿着「{question}」寻找反例、边界案例、失败定义和不可比基线。"
+        return {
+            "role": "executioner",
+            "task_understood": task,
+            "new_attacks": [],
+            "strongest_attack": "",
+            "killed_arguments": [],
+            "open_questions": ["哪些问题目前还不能被压成 yes/no 或 verdict？"],
+            "coverage_gaps": [gap],
+            "research_threads": [thread],
+            "evidence_requests": [
+                {
+                    "query": f"{focus} survey review competing hypotheses",
+                    "reason": "探索模式需要先扫相邻概念、综述和竞争解释，而不是直接裁决。",
+                    "source_type": "web",
+                    "priority": "medium",
+                }
+            ],
+            "state_patch": {
+                "coverage_gaps": [gap],
+                "research_threads": [thread],
+                "open_questions": ["哪些问题目前还不能被压成 yes/no 或 verdict？"],
+                "evidence_requests": [
+                    {
+                        "query": f"{focus} survey review competing hypotheses",
+                        "reason": "探索模式需要先扫相邻概念、综述和竞争解释，而不是直接裁决。",
+                        "source_type": "web",
+                        "priority": "medium",
+                    }
+                ],
+            },
+        }
+
+    if role == "defender":
+        hypothesis = f"{angle}: {focus} 可能不是单一方案问题，而是一组待分解的机制、情境和评价标准。"
+        thread = f"把「{focus}」拆成定义、现象、机制、可观察信号和已有研究传统五条线。"
+        finding = "探索阶段的核心收益是保留多种解释路径，避免把资料不足误判为方案失败。"
+        return {
+            "role": "defender",
+            "task_understood": task,
+            "honest_defenses": [],
+            "strongest_defense": "",
+            "surviving_arguments": [],
+            "open_questions": ["有哪些互相竞争但目前都还合理的解释？"],
+            "hypotheses": [hypothesis],
+            "research_threads": [thread],
+            "findings": [finding],
+            "state_patch": {
+                "hypotheses": [hypothesis],
+                "research_threads": [thread],
+                "findings": [finding],
+                "open_questions": ["有哪些互相竞争但目前都还合理的解释？"],
+            },
+        }
+
+    if role == "builder":
+        thread = "用 30-60 分钟做第一轮资料发现：关键词、综述/README/benchmark、反例、相邻术语各至少 2 条。"
+        gap = "还没有足够资料判断哪些分支值得转成 decision node。"
+        finding = "下一步不是构建 MVP，而是降低未知空间：先找资料、聚类假设、再选择可裁决节点。"
+        return {
+            "role": "builder",
+            "task_understood": task,
+            "redesign_options": [],
+            "best_redesign": "",
+            "surviving_arguments": [],
+            "open_questions": ["哪条研究线索最值得先补证据？"],
+            "research_threads": [thread],
+            "coverage_gaps": [gap],
+            "findings": [finding],
+            "evidence_requests": [
+                {
+                    "query": f"{focus} benchmark dataset baseline implementation",
+                    "reason": "需要基线、数据集、已有实现或评价方式来决定后续是否可裁决。",
+                    "source_type": "web",
+                    "priority": "medium",
+                }
+            ],
+            "state_patch": {
+                "research_threads": [thread],
+                "coverage_gaps": [gap],
+                "findings": [finding],
+                "open_questions": ["哪条研究线索最值得先补证据？"],
+                "evidence_requests": [
+                    {
+                        "query": f"{focus} benchmark dataset baseline implementation",
+                        "reason": "需要基线、数据集、已有实现或评价方式来决定后续是否可裁决。",
+                        "source_type": "web",
+                        "priority": "medium",
+                    }
+                ],
+            },
+        }
+
+    if role == "judge":
+        return {
+            "role": "judge",
+            "verdict": "undecided",
+            "confidence": "low",
+            "reasoning_summary": "当前是 exploration mode，尚不适合给 KILL/REDESIGN/TEST/BUILD。",
+            "what_would_change_the_verdict": "选择一条具体假设、导入必要证据，并切换 /mode decision。",
+            "next_validation_action": "继续资料扫描或将一条研究线索转成可裁决问题。",
+            "evidence_requests": [],
+            "state_patch": {
+                "open_questions": ["要把哪条探索线索切换成 decision node？"]
+            },
+        }
+
+    raise LLMError(f"Unknown role: {role}")
+
+
 def mock_chair(state: Dict[str, Any], task: str) -> Dict[str, Any]:
     task_lower = task.lower()
-    if "initial major question" in task_lower or "bootstrap" in task_lower:
+    if "initial major question" in task_lower or "initial exploration" in task_lower or "bootstrap" in task_lower:
         question = _mock_initial_major_question(state)
+        state_patch = {"current_major_question": question}
+        if state.get("agenda_mode") == "exploration":
+            focus = state.get("exploration_focus") or state.get("core_claim", "")
+            state_patch.update(
+                {
+                    "exploration_focus": focus,
+                    "research_threads": ["定义与边界", "竞争性假设", "资料与基线扫描"],
+                    "coverage_gaps": ["尚未导入资料，不能裁决。"],
+                }
+            )
         return {
             "role": "chair",
             "decision_type": "wait_user",
             "role_to_call": None,
             "clone_count": 0,
             "clone_tasks": [],
-            "reason": "为新 session 生成 topic-specific 的第一轮 major question。",
+            "reason": "为新 session 生成 topic-specific 的第一轮探索框架。" if state.get("agenda_mode") == "exploration" else "为新 session 生成 topic-specific 的第一轮 major question。",
             "requires_user_intervention": False,
             "message_to_user": "",
-            "state_patch": {"current_major_question": question},
+            "state_patch": state_patch,
             "closing_statement": None,
         }
+
+    if "exploration synthesis" in task_lower:
+        return _mock_chair_exploration_close(state)
 
     if "closing" in task.lower() or "close" in task.lower():
         return _mock_chair_close(state)
@@ -382,6 +517,47 @@ def mock_chair(state: Dict[str, Any], task: str) -> Dict[str, Any]:
         }
 
     limits = state.get("clone_limits", {})
+    if state.get("agenda_mode") == "exploration":
+        if not state.get("hypotheses"):
+            count = min(2, int(limits.get("defender", 1)))
+            return _chair_call(
+                "defender",
+                count,
+                "探索模式先保留多个竞争性假设，而不是裁决。",
+                "让 Defender 生成互相竞争的解释和相邻概念。",
+                agenda_mode="exploration",
+            )
+        if not state.get("coverage_gaps"):
+            count = min(3, int(limits.get("executioner", 1)))
+            return _chair_call(
+                "executioner",
+                count,
+                "已有初步假设，下一步扫描盲区和过早收敛风险。",
+                "让 Executioner 找资料缺口、反例和边界。",
+                agenda_mode="exploration",
+            )
+        if not state.get("research_threads") or len(state.get("research_threads") or []) < 3:
+            count = min(2, int(limits.get("builder", 1)))
+            return _chair_call(
+                "builder",
+                count,
+                "需要把未知空间变成下一轮资料发现动作。",
+                "让 Builder 设计最小资料扫描计划。",
+                agenda_mode="exploration",
+            )
+        return {
+            "role": "chair",
+            "decision_type": "wait_user",
+            "role_to_call": None,
+            "clone_count": 0,
+            "clone_tasks": [],
+            "reason": "探索地图已有初步假设、线索和缺口；下一步需要用户补 evidence 或选择线索。",
+            "requires_user_intervention": True,
+            "message_to_user": "请选择一条研究线索继续补资料，或用 /mode decision 把它转成可裁决问题。",
+            "state_patch": {"requires_user_intervention": True},
+            "closing_statement": None,
+        }
+
     if not state.get("strongest_attack"):
         count = min(3, int(limits.get("executioner", 1)))
         return _chair_call("executioner", count, "当前 major question 尚缺少清晰攻击面。", "先让 Executioner 从独立失败面攻击。")
@@ -418,13 +594,19 @@ def _mock_initial_major_question(state: Dict[str, Any]) -> str:
     return f"围绕「{claim}」，最需要先澄清的核心定义、适用边界和可证伪标准是什么？"
 
 
-def _chair_call(role: str, count: int, reason: str, message: str) -> Dict[str, Any]:
+def _chair_call(
+    role: str,
+    count: int,
+    reason: str,
+    message: str,
+    agenda_mode: str = "decision",
+) -> Dict[str, Any]:
     return {
         "role": "chair",
         "decision_type": "spawn_clones" if count > 1 else "call_role",
         "role_to_call": role,
         "clone_count": count,
-        "clone_tasks": _clone_tasks(role, count),
+        "clone_tasks": _clone_tasks(role, count, agenda_mode),
         "reason": reason,
         "requires_user_intervention": False,
         "message_to_user": message,
@@ -433,40 +615,112 @@ def _chair_call(role: str, count: int, reason: str, message: str) -> Dict[str, A
     }
 
 
-def _clone_tasks(role: str, count: int) -> List[Dict[str, str]]:
-    angles = {
-        "executioner": [
-            "attack definition ambiguity",
-            "attack evidence gap",
-            "attack execution complexity",
-            "attack user workflow friction",
-            "attack falsifiability",
-        ],
-        "defender": [
-            "defend from user value",
-            "defend from minimal MVP feasibility",
-            "defend from learning value",
-        ],
-        "builder": [
-            "design the lightest MVP",
-            "design the smallest falsifiable test",
-            "design the simplest operational workflow",
-        ],
-        "judge": [
-            "judge product value",
-            "judge implementation complexity",
-            "judge validation value",
-        ],
-    }.get(role, ["default angle"])
+def _clone_tasks(role: str, count: int, agenda_mode: str = "decision") -> List[Dict[str, str]]:
+    if agenda_mode == "exploration":
+        angles = {
+            "executioner": [
+                "scan premature closure and false dichotomies",
+                "map missing evidence and source blind spots",
+                "surface underexplored counter-hypotheses",
+            ],
+            "defender": [
+                "generate plausible competing hypotheses",
+                "connect adjacent concepts and literatures",
+                "charitably expand possible mechanisms",
+            ],
+            "builder": [
+                "design source discovery plan",
+                "design research space scan",
+                "turn unknowns into next probes",
+            ],
+            "judge": [
+                "assess readiness to convert into decision node",
+                "identify what remains too open to judge",
+            ],
+        }.get(role, ["default exploratory angle"])
+        task_prefix = "Explore current frame from this independent angle only"
+    else:
+        angles = {
+            "executioner": [
+                "attack definition ambiguity",
+                "attack evidence gap",
+                "attack execution complexity",
+                "attack user workflow friction",
+                "attack falsifiability",
+            ],
+            "defender": [
+                "defend from user value",
+                "defend from minimal MVP feasibility",
+                "defend from learning value",
+            ],
+            "builder": [
+                "design the lightest MVP",
+                "design the smallest falsifiable test",
+                "design the simplest operational workflow",
+            ],
+            "judge": [
+                "judge product value",
+                "judge implementation complexity",
+                "judge validation value",
+            ],
+        }.get(role, ["default angle"])
+        task_prefix = "Evaluate current major question from this independent angle only"
 
     return [
         {
             "name": f"{role.capitalize()}-{index + 1}",
             "angle": angles[index % len(angles)],
-            "task": f"Evaluate current major question from this independent angle only: {angles[index % len(angles)]}",
+            "task": f"{task_prefix}: {angles[index % len(angles)]}",
         }
         for index in range(count)
     ]
+
+
+def _mock_chair_exploration_close(state: Dict[str, Any]) -> Dict[str, Any]:
+    question = state.get("current_major_question") or "当前 exploration frame"
+    closing = f"""## Chair exploration synthesis
+
+Exploration frame:
+{question}
+
+Exploration focus:
+{state.get('exploration_focus') or state.get('core_claim', '')}
+
+Hypotheses preserved:
+{'; '.join(state.get('hypotheses') or ['尚未形成明确竞争性假设。'])}
+
+Research threads:
+{'; '.join(state.get('research_threads') or ['定义、假设、资料路径仍需展开。'])}
+
+Findings so far:
+{'; '.join(state.get('findings') or ['尚未沉淀明确发现。'])}
+
+Coverage gaps:
+{'; '.join(state.get('coverage_gaps') or ['尚未记录覆盖缺口。'])}
+
+Evidence requests:
+{json.dumps(state.get('evidence_requests') or [], ensure_ascii=False, indent=2)}
+
+Candidate decision nodes:
+{'; '.join(state.get('open_questions') or ['选择一条研究线索，切换 /mode decision 后再裁决。'])}
+
+Mode recommendation:
+MANUAL
+
+Reason:
+探索模式的关闭动作只是阶段性地图综合，不输出 verdict。"""
+    return {
+        "role": "chair",
+        "decision_type": "close_question",
+        "role_to_call": None,
+        "clone_count": 0,
+        "clone_tasks": [],
+        "reason": "探索模式阶段性综合，不裁决。",
+        "requires_user_intervention": True,
+        "message_to_user": "已综合当前探索地图；下一步补 evidence 或选择线索转入 decision mode。",
+        "state_patch": {"requires_user_intervention": True},
+        "closing_statement": closing,
+    }
 
 
 def _mock_chair_close(state: Dict[str, Any]) -> Dict[str, Any]:

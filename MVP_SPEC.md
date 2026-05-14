@@ -8,7 +8,9 @@
 
 MVP CLI 支持：
 
-- `/start <idea>`：创建新 session，初始化 shared state。
+- `/start <idea>`：创建 decision session，初始化 shared state。
+- `/explore <question>`：创建 exploration session，用开放探索框架替代可裁决 decision node。
+- `/mode [exploration|decision]`：查看或切换当前 session 的议程模式。
 - `/auto <N>`：让 Chair 自动推进 N 个调度步骤。MVP 单次硬上限为 3，超过上限直接拒绝，不静默执行。
 - `/manual`：切换到 manual mode，并设置 `requires_user_intervention = true`。
 - `/exec`：手动调用单个 Executioner。
@@ -52,6 +54,36 @@ Chair 决策顺序：
 8. 如果 Chair 判断需要真实业务约束、用户价值判断或用户立场选择，设置 `requires_user_intervention = true` 并等待用户。
 
 Chair 输出必须是结构化调度结果。运行时会做轻量 JSON validation：非法角色、非法 verdict、超上限 clone_count、越权 state_patch、list/string 类型错误都会被规范化、裁剪或 fail-closed。
+
+
+## 2A. Exploration mode
+
+`agenda_mode` 与 `chair_mode` 分离：
+
+- `chair_mode = manual | auto` 控制是否连续推进；
+- `agenda_mode = decision | exploration` 控制议程形态。
+
+Exploration mode 的规则：
+
+1. `current_major_question` 表示 exploration frame，不表示 verdict node。
+2. Chair 不应自动调用 Judge，也不应自动输出 `KILL / REDESIGN / TEST / BUILD`。
+3. Defender 优先生成 `hypotheses`；Executioner 优先生成 `coverage_gaps`；Builder 优先生成 `research_threads`、资料扫描计划和 `evidence_requests`。
+4. Merger 在 exploration mode 中保留多样性，不把多条线索强行合并成一个 strongest verdict。
+5. `/close` 输出 exploration synthesis，不要求 Judge 先裁决。
+6. 当某条线索足够具体，用户用 `/mode decision` 切换后再进入原 decision lifecycle。
+
+新增 state 字段：
+
+```json
+{
+  "agenda_mode": "decision",
+  "exploration_focus": "",
+  "hypotheses": [],
+  "research_threads": [],
+  "findings": [],
+  "coverage_gaps": []
+}
+```
 
 ## 3. 什么时候克隆角色
 

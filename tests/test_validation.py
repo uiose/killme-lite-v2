@@ -10,8 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_chair_state_patch_allowlist_matches_prompt_contract():
     assert PATCH_FIELDS_BY_ROLE["chair"] == {
         "current_major_question",
+        "exploration_focus",
         "pending_next_question",
         "requires_user_intervention",
+        "hypotheses",
+        "research_threads",
+        "findings",
+        "coverage_gaps",
         "evidence_requests",
     }
 
@@ -26,6 +31,10 @@ def test_chair_disallowed_state_patch_fields_are_dropped():
                 "current_major_question": "allowed",
                 "pending_next_question": "allowed next",
                 "requires_user_intervention": True,
+                "hypotheses": ["allowed hypothesis"],
+                "research_threads": ["allowed thread"],
+                "findings": ["allowed finding"],
+                "coverage_gaps": ["allowed gap"],
                 "evidence_requests": [{"query": "allowed search"}],
                 "strongest_attack": "forbidden",
                 "strongest_defense": "forbidden",
@@ -44,6 +53,10 @@ def test_chair_disallowed_state_patch_fields_are_dropped():
         "current_major_question": "allowed",
         "pending_next_question": "allowed next",
         "requires_user_intervention": True,
+        "hypotheses": ["allowed hypothesis"],
+        "research_threads": ["allowed thread"],
+        "findings": ["allowed finding"],
+        "coverage_gaps": ["allowed gap"],
         "evidence_requests": [{"query": "allowed search"}],
     }
     warnings = "\n".join(decision["validation_warnings"])
@@ -73,3 +86,62 @@ def test_agent_can_request_evidence_but_cannot_write_evidence_items():
         {"query": "ToolBench quickstart", "reason": "check setup cost"}
     ]
     assert "evidence_items" not in result["state_patch"]
+
+
+def test_exploration_fields_are_allowed_for_relevant_roles():
+    state = new_state(ROOT, "exploration contract", agenda_mode="exploration")
+    result = validate_agent_output(
+        "defender",
+        {
+            "role": "defender",
+            "hypotheses": ["hypothesis A"],
+            "research_threads": ["thread A"],
+            "findings": ["finding A"],
+            "state_patch": {
+                "hypotheses": ["hypothesis B"],
+                "research_threads": ["thread B"],
+                "findings": ["finding B"],
+                "coverage_gaps": ["not allowed for defender"],
+            },
+        },
+        state,
+    )
+
+    assert result["state_patch"]["hypotheses"] == ["hypothesis B"]
+    assert result["state_patch"]["research_threads"] == ["thread B"]
+    assert result["state_patch"]["findings"] == ["finding B"]
+    assert "coverage_gaps" not in result["state_patch"]
+
+
+def test_top_level_exploration_fields_still_respect_role_allowlist():
+    state = new_state(ROOT, "exploration contract", agenda_mode="exploration")
+    result = validate_agent_output(
+        "defender",
+        {
+            "role": "defender",
+            "hypotheses": ["allowed hypothesis"],
+            "coverage_gaps": ["not allowed top-level gap"],
+            "state_patch": {},
+        },
+        state,
+    )
+
+    assert result["state_patch"]["hypotheses"] == ["allowed hypothesis"]
+    assert "coverage_gaps" not in result["state_patch"]
+
+
+def test_judge_verdict_is_blocked_in_exploration_mode():
+    state = new_state(ROOT, "exploration contract", agenda_mode="exploration")
+    result = validate_agent_output(
+        "judge",
+        {
+            "role": "judge",
+            "verdict": "KILL",
+            "state_patch": {"judge_verdict": "KILL"},
+        },
+        state,
+    )
+
+    assert result["verdict"] == "undecided"
+    assert "judge_verdict" not in result["state_patch"]
+    assert "judge_verdict_blocked_in_exploration" in result["validation_warnings"]

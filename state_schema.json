@@ -1,9 +1,11 @@
 {
   "session_id": "",
   "chair_mode": "manual",
+  "agenda_mode": "decision",
   "round": 0,
   "core_claim": "",
   "current_major_question": "",
+  "exploration_focus": "",
   "major_question_history": [],
   "user_position": "",
   "strongest_attack": "",
@@ -21,6 +23,10 @@
   "surviving_arguments": [],
   "evidence_items": [],
   "evidence_requests": [],
+  "hypotheses": [],
+  "research_threads": [],
+  "findings": [],
+  "coverage_gaps": [],
   "pending_next_question": "",
   "requires_user_intervention": false
 }

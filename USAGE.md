@@ -31,13 +31,25 @@ uv run python main.py  # 启动
 /summary
 ```
 
+开放探究问题用 exploration mode：
+
+```text
+/explore killme-lite 的 prompt 和议程机制是否会过早压缩探索性问题
+/auto 3
+/evidence requests
+/summary
+/mode decision
+```
+
 退出：
 
 ```text
 /quit
 ```
 
-`/start` 会先创建 session，然后由 Chair 根据你的 idea 生成一个 topic-specific 的第一轮 `current_major_question`。如果真实 LLM 不可用，runtime 会降级到本地兜底问题，保证 session 仍能创建。
+`/start` 会先创建 decision session，然后由 Chair 根据你的 idea 生成一个 topic-specific 的第一轮 `current_major_question`。如果真实 LLM 不可用，runtime 会降级到本地兜底问题，保证 session 仍能创建。
+
+`/explore` 会创建 exploration session。它不自动 Judge，不输出 `KILL / REDESIGN / TEST / BUILD`，而是维护 `hypotheses / research_threads / findings / coverage_gaps`。当某条线索足够具体后，用 `/mode decision` 回到可裁决议程。
 
 ---
 

@@ -7,9 +7,19 @@ VALID_ROLES = {"executioner", "defender", "builder", "judge"}
 VALID_DECISION_TYPES = {"call_role", "spawn_clones", "judge", "close_question", "wait_user"}
 VALID_VERDICTS = {"KILL", "REDESIGN", "TEST", "BUILD", "undecided"}
 VALID_CONFIDENCE = {"low", "medium", "high"}
-LIST_PATCH_FIELDS = {"open_questions", "killed_arguments", "surviving_arguments", "evidence_requests"}
+VALID_AGENDA_MODES = {"decision", "exploration"}
+EXPLORATION_LIST_FIELDS = {"hypotheses", "research_threads", "findings", "coverage_gaps"}
+LIST_PATCH_FIELDS = {
+    "open_questions",
+    "killed_arguments",
+    "surviving_arguments",
+    "evidence_requests",
+    *EXPLORATION_LIST_FIELDS,
+}
 SCALAR_PATCH_FIELDS = {
+    "agenda_mode",
     "current_major_question",
+    "exploration_focus",
     "strongest_attack",
     "strongest_defense",
     "best_redesign",
@@ -20,13 +30,41 @@ SCALAR_PATCH_FIELDS = {
 PATCH_FIELDS_BY_ROLE = {
     "chair": {
         "current_major_question",
+        "exploration_focus",
         "pending_next_question",
         "requires_user_intervention",
         "evidence_requests",
+        "hypotheses",
+        "research_threads",
+        "findings",
+        "coverage_gaps",
     },
-    "executioner": {"strongest_attack", "killed_arguments", "open_questions", "evidence_requests"},
-    "defender": {"strongest_defense", "surviving_arguments", "open_questions", "evidence_requests"},
-    "builder": {"best_redesign", "surviving_arguments", "open_questions", "evidence_requests"},
+    "executioner": {
+        "strongest_attack",
+        "killed_arguments",
+        "open_questions",
+        "evidence_requests",
+        "research_threads",
+        "coverage_gaps",
+    },
+    "defender": {
+        "strongest_defense",
+        "surviving_arguments",
+        "open_questions",
+        "evidence_requests",
+        "hypotheses",
+        "research_threads",
+        "findings",
+    },
+    "builder": {
+        "best_redesign",
+        "surviving_arguments",
+        "open_questions",
+        "evidence_requests",
+        "research_threads",
+        "findings",
+        "coverage_gaps",
+    },
     "judge": {
         "judge_verdict",
         "open_questions",
@@ -43,6 +81,10 @@ PATCH_FIELDS_BY_ROLE = {
         "killed_arguments",
         "surviving_arguments",
         "evidence_requests",
+        "hypotheses",
+        "research_threads",
+        "findings",
+        "coverage_gaps",
     },
 }
 MAX_TEXT = 1600
@@ -148,6 +190,7 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
     evidence_requests = _list(data.get("evidence_requests"))
     if evidence_requests and "evidence_requests" not in patch:
         patch["evidence_requests"] = evidence_requests
+    _merge_top_level_exploration_fields(data, patch, role)
 
     if role == "executioner":
         strongest = _text(data.get("strongest_attack"))
@@ -221,7 +264,12 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
         if confidence not in VALID_CONFIDENCE:
             issues.append("invalid_confidence_normalized")
             confidence = "medium"
-        if verdict != "undecided":
+        if (state or {}).get("agenda_mode") == "exploration":
+            if verdict != "undecided" or patch.get("judge_verdict"):
+                issues.append("judge_verdict_blocked_in_exploration")
+            verdict = "undecided"
+            patch.pop("judge_verdict", None)
+        elif verdict != "undecided":
             patch["judge_verdict"] = verdict
         return {
             "role": "judge",
@@ -244,6 +292,16 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
     }
 
 
+def _merge_top_level_exploration_fields(data: Dict[str, Any], patch: Dict[str, Any], source_role: str) -> None:
+    allowed = PATCH_FIELDS_BY_ROLE.get(source_role, set())
+    for field in EXPLORATION_LIST_FIELDS:
+        if field not in allowed:
+            continue
+        values = _list(data.get(field))
+        if values and field not in patch:
+            patch[field] = values
+
+
 def sanitize_state_patch(raw: Any, state: Optional[Dict[str, Any]] = None, source_role: Optional[str] = None) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
@@ -259,6 +317,10 @@ def sanitize_state_patch(raw: Any, state: Optional[Dict[str, Any]] = None, sourc
             continue
         if key == "requires_user_intervention":
             patch[key] = _to_bool(value, False)
+        elif key == "agenda_mode":
+            agenda_mode = normalize_agenda_mode(value)
+            if agenda_mode:
+                patch[key] = agenda_mode
         elif key == "judge_verdict":
             verdict = normalize_verdict(value, default="undecided")
             if verdict != "undecided":
@@ -338,6 +400,25 @@ def normalize_decision_type(value: Any) -> str:
     if "call" in raw or "role" in raw:
         return "call_role"
     return "wait_user"
+
+
+def normalize_agenda_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "explore": "exploration",
+        "exploratory": "exploration",
+        "research": "exploration",
+        "scan": "exploration",
+        "探索": "exploration",
+        "探究": "exploration",
+        "decision_node": "decision",
+        "decide": "decision",
+        "deliberation": "decision",
+        "裁决": "decision",
+        "决策": "decision",
+    }
+    raw = aliases.get(raw, raw)
+    return raw if raw in VALID_AGENDA_MODES else ""
 
 
 def normalize_verdict(value: Any, default: str = "undecided") -> str:

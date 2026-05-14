@@ -9,9 +9,11 @@ from typing import Any, Dict, Iterable, List
 DEFAULT_STATE = {
     "session_id": "",
     "chair_mode": "manual",
+    "agenda_mode": "decision",
     "round": 0,
     "core_claim": "",
     "current_major_question": "",
+    "exploration_focus": "",
     "major_question_history": [],
     "user_position": "",
     "strongest_attack": "",
@@ -29,6 +31,10 @@ DEFAULT_STATE = {
     "surviving_arguments": [],
     "evidence_items": [],
     "evidence_requests": [],
+    "hypotheses": [],
+    "research_threads": [],
+    "findings": [],
+    "coverage_gaps": [],
     "pending_next_question": "",
     "requires_user_intervention": False,
 }
@@ -39,12 +45,27 @@ LIST_FIELDS = {
     "surviving_arguments",
     "evidence_items",
     "evidence_requests",
+    "hypotheses",
+    "research_threads",
+    "findings",
+    "coverage_gaps",
 }
-PATCH_LIST_FIELDS = {"open_questions", "killed_arguments", "surviving_arguments", "evidence_requests"}
+PATCH_LIST_FIELDS = {
+    "open_questions",
+    "killed_arguments",
+    "surviving_arguments",
+    "evidence_requests",
+    "hypotheses",
+    "research_threads",
+    "findings",
+    "coverage_gaps",
+}
 HISTORY_FIELD = "major_question_history"
 MUTABLE_SCALAR_FIELDS = {
     "chair_mode",
+    "agenda_mode",
     "current_major_question",
+    "exploration_focus",
     "strongest_attack",
     "strongest_defense",
     "best_redesign",
@@ -54,6 +75,7 @@ MUTABLE_SCALAR_FIELDS = {
 }
 VALID_VERDICTS = {"undecided", "KILL", "REDESIGN", "TEST", "BUILD"}
 VALID_CHAIR_MODES = {"manual", "auto"}
+VALID_AGENDA_MODES = {"decision", "exploration"}
 MAX_LIST_ITEMS = 80
 MAX_HISTORY_ITEMS = 50
 MAX_USER_POSITION_CHARS = 1200
@@ -62,6 +84,7 @@ MAX_CLONE_LIMIT = 5
 
 INITIAL_USER_POSITION = "用户刚启动审议，尚未补充额外约束。"
 INITIAL_MAJOR_QUESTION = "围绕这个想法，最需要先澄清的核心定义、适用边界和可证伪标准是什么？"
+INITIAL_EXPLORATION_QUESTION = "围绕这个开放问题，先展开哪些定义、相邻问题、竞争性假设和资料路径，才能避免过早收敛？"
 
 
 def load_state_template(base_dir: Path) -> Dict[str, Any]:
@@ -79,18 +102,30 @@ def new_session_id() -> str:
     return f"session-{uuid.uuid4().hex[:12]}"
 
 
-def new_state(base_dir: Path, idea: str) -> Dict[str, Any]:
+def new_state(base_dir: Path, idea: str, agenda_mode: str = "decision") -> Dict[str, Any]:
     state = load_state_template(base_dir)
+    agenda_mode = str(agenda_mode or "decision").strip().lower()
+    if agenda_mode not in VALID_AGENDA_MODES:
+        agenda_mode = "decision"
+
     state["session_id"] = new_session_id()
     state["chair_mode"] = "manual"
+    state["agenda_mode"] = agenda_mode
     state["round"] = 0
     state["core_claim"] = idea.strip()
-    state["current_major_question"] = INITIAL_MAJOR_QUESTION
+    state["exploration_focus"] = idea.strip() if agenda_mode == "exploration" else ""
+    state["current_major_question"] = (
+        INITIAL_EXPLORATION_QUESTION if agenda_mode == "exploration" else INITIAL_MAJOR_QUESTION
+    )
     state["major_question_history"] = []
     state["user_position"] = INITIAL_USER_POSITION
     state["judge_verdict"] = "undecided"
     state["pending_next_question"] = ""
     state["requires_user_intervention"] = False
+    state["hypotheses"] = []
+    state["research_threads"] = []
+    state["findings"] = []
+    state["coverage_gaps"] = []
     return ensure_shape(state)
 
 
@@ -123,6 +158,9 @@ def ensure_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     if shaped.get("chair_mode") not in VALID_CHAIR_MODES:
         shaped["chair_mode"] = "manual"
 
+    if shaped.get("agenda_mode") not in VALID_AGENDA_MODES:
+        shaped["agenda_mode"] = "decision"
+
     if shaped.get("judge_verdict") not in VALID_VERDICTS:
         shaped["judge_verdict"] = "undecided"
 
@@ -130,6 +168,7 @@ def ensure_shape(state: Dict[str, Any]) -> Dict[str, Any]:
         "session_id",
         "core_claim",
         "current_major_question",
+        "exploration_focus",
         "user_position",
         "strongest_attack",
         "strongest_defense",
@@ -208,6 +247,10 @@ def apply_state_patch(state: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str,
             elif key == "chair_mode":
                 mode = str(value).strip().lower()
                 if mode in VALID_CHAIR_MODES:
+                    state[key] = mode
+            elif key == "agenda_mode":
+                mode = str(value).strip().lower()
+                if mode in VALID_AGENDA_MODES:
                     state[key] = mode
             else:
                 state[key] = str(value).strip()

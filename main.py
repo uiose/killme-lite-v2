@@ -52,7 +52,7 @@ def run_script(router: Router, script_path: str) -> int:
 def repl(router: Router) -> int:
     router.progress = lambda message: print(message, flush=True)
     print("killme-lite CLI")
-    print("Type /start <idea> to begin. Type Ctrl-D or /quit to exit.")
+    print("Type /start <idea> for decision mode, or /explore <question> for exploration mode. Type Ctrl-D or /quit to exit.")
     while True:
         try:
             line = input("killme> ").strip()
