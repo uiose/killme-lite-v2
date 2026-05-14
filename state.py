@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import re
 import uuid
@@ -14,6 +15,8 @@ DEFAULT_STATE = {
     "core_claim": "",
     "current_major_question": "",
     "exploration_focus": "",
+    "exploration_status": "paused",
+    "exploration_clone_mode": "independent",
     "major_question_history": [],
     "user_position": "",
     "strongest_attack": "",
@@ -35,6 +38,10 @@ DEFAULT_STATE = {
     "research_threads": [],
     "findings": [],
     "coverage_gaps": [],
+    "decision_candidates": [],
+    "exploration_nodes": [],
+    "exploration_edges": [],
+    "anomalies": [],
     "pending_next_question": "",
     "requires_user_intervention": False,
 }
@@ -49,6 +56,10 @@ LIST_FIELDS = {
     "research_threads",
     "findings",
     "coverage_gaps",
+    "decision_candidates",
+    "exploration_nodes",
+    "exploration_edges",
+    "anomalies",
 }
 PATCH_LIST_FIELDS = {
     "open_questions",
@@ -59,6 +70,10 @@ PATCH_LIST_FIELDS = {
     "research_threads",
     "findings",
     "coverage_gaps",
+    "decision_candidates",
+    "exploration_nodes",
+    "exploration_edges",
+    "anomalies",
 }
 HISTORY_FIELD = "major_question_history"
 MUTABLE_SCALAR_FIELDS = {
@@ -66,6 +81,8 @@ MUTABLE_SCALAR_FIELDS = {
     "agenda_mode",
     "current_major_question",
     "exploration_focus",
+    "exploration_status",
+    "exploration_clone_mode",
     "strongest_attack",
     "strongest_defense",
     "best_redesign",
@@ -76,7 +93,9 @@ MUTABLE_SCALAR_FIELDS = {
 VALID_VERDICTS = {"undecided", "KILL", "REDESIGN", "TEST", "BUILD"}
 VALID_CHAIR_MODES = {"manual", "auto"}
 VALID_AGENDA_MODES = {"decision", "exploration"}
-MAX_LIST_ITEMS = 80
+VALID_EXPLORATION_STATUSES = {"open", "paused", "synthesized"}
+VALID_EXPLORATION_CLONE_MODES = {"independent", "visible"}
+MAX_LIST_ITEMS = 120
 MAX_HISTORY_ITEMS = 50
 MAX_USER_POSITION_CHARS = 1200
 MAX_CLONE_LIMIT = 5
@@ -114,6 +133,8 @@ def new_state(base_dir: Path, idea: str, agenda_mode: str = "decision") -> Dict[
     state["round"] = 0
     state["core_claim"] = idea.strip()
     state["exploration_focus"] = idea.strip() if agenda_mode == "exploration" else ""
+    state["exploration_status"] = "open" if agenda_mode == "exploration" else "paused"
+    state["exploration_clone_mode"] = "independent"
     state["current_major_question"] = (
         INITIAL_EXPLORATION_QUESTION if agenda_mode == "exploration" else INITIAL_MAJOR_QUESTION
     )
@@ -126,6 +147,10 @@ def new_state(base_dir: Path, idea: str, agenda_mode: str = "decision") -> Dict[
     state["research_threads"] = []
     state["findings"] = []
     state["coverage_gaps"] = []
+    state["decision_candidates"] = []
+    state["exploration_nodes"] = []
+    state["exploration_edges"] = []
+    state["anomalies"] = []
     return ensure_shape(state)
 
 
@@ -144,7 +169,12 @@ def ensure_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     shaped["clone_limits"] = clone_limits
 
     for field in LIST_FIELDS:
-        shaped[field] = normalize_list(shaped.get(field))[-MAX_LIST_ITEMS:]
+        if field == "exploration_nodes":
+            shaped[field] = normalize_exploration_nodes(shaped.get(field))[-MAX_LIST_ITEMS:]
+        elif field == "exploration_edges":
+            shaped[field] = normalize_exploration_edges(shaped.get(field))[-MAX_LIST_ITEMS:]
+        else:
+            shaped[field] = normalize_list(shaped.get(field))[-MAX_LIST_ITEMS:]
 
     shaped[HISTORY_FIELD] = normalize_history(shaped.get(HISTORY_FIELD))[-MAX_HISTORY_ITEMS:]
 
@@ -161,6 +191,12 @@ def ensure_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     if shaped.get("agenda_mode") not in VALID_AGENDA_MODES:
         shaped["agenda_mode"] = "decision"
 
+    if shaped.get("exploration_status") not in VALID_EXPLORATION_STATUSES:
+        shaped["exploration_status"] = "open" if shaped.get("agenda_mode") == "exploration" else "paused"
+
+    if shaped.get("exploration_clone_mode") not in VALID_EXPLORATION_CLONE_MODES:
+        shaped["exploration_clone_mode"] = "independent"
+
     if shaped.get("judge_verdict") not in VALID_VERDICTS:
         shaped["judge_verdict"] = "undecided"
 
@@ -169,6 +205,8 @@ def ensure_shape(state: Dict[str, Any]) -> Dict[str, Any]:
         "core_claim",
         "current_major_question",
         "exploration_focus",
+        "exploration_status",
+        "exploration_clone_mode",
         "user_position",
         "strongest_attack",
         "strongest_defense",
@@ -193,6 +231,64 @@ def normalize_list(value: Any) -> List[Any]:
     if isinstance(value, list):
         return [item for item in value if item not in (None, "", [], {})]
     return [str(value)] if value not in (None, "") else []
+
+
+def normalize_exploration_nodes(value: Any) -> List[Dict[str, Any]]:
+    nodes: List[Dict[str, Any]] = []
+    for item in normalize_list(value):
+        if isinstance(item, dict):
+            label = _first_nonempty(
+                item.get("label"),
+                item.get("title"),
+                item.get("claim"),
+                item.get("summary"),
+                item.get("text"),
+                item.get("query"),
+            )
+            if not label:
+                label = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            node_type = str(item.get("type") or item.get("node_type") or "note").strip().lower()
+            node = {
+                "id": _safe_id(item.get("id"), prefix="n", seed=f"{node_type}:{label}"),
+                "type": node_type,
+                "label": _clip_text(label, 240),
+            }
+            for key in ("summary", "status", "source_role", "source", "tags", "confidence"):
+                if item.get(key) not in (None, "", [], {}):
+                    node[key] = item[key]
+            nodes.append(node)
+        elif item not in (None, ""):
+            label = str(item).strip()
+            nodes.append({"id": _safe_id(None, prefix="n", seed=f"note:{label}"), "type": "note", "label": _clip_text(label, 240)})
+    return _dedupe_by_key(nodes, key="id")
+
+
+def normalize_exploration_edges(value: Any) -> List[Dict[str, Any]]:
+    edges: List[Dict[str, Any]] = []
+    for item in normalize_list(value):
+        if isinstance(item, dict):
+            source = _first_nonempty(item.get("source"), item.get("from"), item.get("source_id"))
+            target = _first_nonempty(item.get("target"), item.get("to"), item.get("target_id"))
+            relation = str(item.get("relation") or item.get("type") or "related_to").strip().lower()
+            summary = _first_nonempty(item.get("summary"), item.get("claim"), item.get("reason"), item.get("label"))
+            if not source and summary:
+                source = _safe_id(None, prefix="n", seed=f"edge-source:{summary}")
+            if not target and summary:
+                target = _safe_id(None, prefix="n", seed=f"edge-target:{summary}")
+            if not source or not target:
+                continue
+            edge = {
+                "id": _safe_id(item.get("id"), prefix="e", seed=f"{source}:{relation}:{target}:{summary}"),
+                "source": str(source),
+                "target": str(target),
+                "relation": relation,
+            }
+            for key in ("summary", "confidence", "source_role"):
+                value_for_key = summary if key == "summary" else item.get(key)
+                if value_for_key not in (None, "", [], {}):
+                    edge[key] = _clip_text(value_for_key, 360) if isinstance(value_for_key, str) else value_for_key
+            edges.append(edge)
+    return _dedupe_by_key(edges, key="id")
 
 
 def normalize_history(value: Any) -> List[Dict[str, Any]]:
@@ -224,7 +320,8 @@ def apply_state_patch(state: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str,
     """Apply a small, validated state patch.
 
     LLM outputs are not allowed to mutate identity, round number, clone limits,
-    user position, or major question history. Those are controlled by local code.
+    user position, major question history, or evidence_items. Those are controlled
+    by local code and explicit evidence commands.
     """
     state = ensure_shape(copy.deepcopy(state))
     if not isinstance(patch, dict) or not patch:
@@ -252,6 +349,16 @@ def apply_state_patch(state: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str,
                 mode = str(value).strip().lower()
                 if mode in VALID_AGENDA_MODES:
                     state[key] = mode
+                    if mode == "exploration" and state.get("exploration_status") == "paused":
+                        state["exploration_status"] = "open"
+            elif key == "exploration_status":
+                status = str(value).strip().lower()
+                if status in VALID_EXPLORATION_STATUSES:
+                    state[key] = status
+            elif key == "exploration_clone_mode":
+                mode = normalize_clone_mode(value)
+                if mode:
+                    state[key] = mode
             else:
                 state[key] = str(value).strip()
 
@@ -274,6 +381,25 @@ def reset_for_next_major_question(state: Dict[str, Any], next_question: str) -> 
     state["pending_next_question"] = ""
     state["requires_user_intervention"] = False
     return state
+
+
+def normalize_clone_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "shared": "visible",
+        "collaborative": "visible",
+        "collab": "visible",
+        "sequential": "visible",
+        "visible_context": "visible",
+        "可见": "visible",
+        "协作": "visible",
+        "independent": "independent",
+        "isolated": "independent",
+        "parallel": "independent",
+        "独立": "independent",
+    }
+    raw = aliases.get(raw, raw)
+    return raw if raw in VALID_EXPLORATION_CLONE_MODES else ""
 
 
 def merge_user_position(existing: str, user_text: str) -> str:
@@ -308,12 +434,14 @@ def append_major_question_history(
     state = ensure_shape(copy.deepcopy(state))
     entry = {
         "round": state.get("round", 0),
+        "agenda_mode": state.get("agenda_mode", "decision"),
         "major_question": major_question or state.get("current_major_question", ""),
         "closing_statement": closing_statement or "",
         "what_survived": list(state.get("surviving_arguments") or [])[-8:],
         "what_was_killed": list(state.get("killed_arguments") or [])[-8:],
         "main_unresolved_tension": state.get("strongest_attack", ""),
         "core_claim": state.get("core_claim", ""),
+        "exploration_focus": state.get("exploration_focus", ""),
         "user_position": state.get("user_position", ""),
         "strongest_attack": state.get("strongest_attack", ""),
         "strongest_defense": state.get("strongest_defense", ""),
@@ -322,6 +450,16 @@ def append_major_question_history(
         "next_major_question": state.get("pending_next_question", ""),
         "mode_recommendation": "MANUAL" if state.get("requires_user_intervention", True) else "AUTO",
         "closed_without_judgement": bool(closed_without_judgement),
+        "exploration_map_snapshot": {
+            "hypotheses": list(state.get("hypotheses") or [])[-12:],
+            "research_threads": list(state.get("research_threads") or [])[-12:],
+            "findings": list(state.get("findings") or [])[-12:],
+            "coverage_gaps": list(state.get("coverage_gaps") or [])[-12:],
+            "decision_candidates": list(state.get("decision_candidates") or [])[-12:],
+            "anomalies": list(state.get("anomalies") or [])[-12:],
+            "nodes": list(state.get("exploration_nodes") or [])[-20:],
+            "edges": list(state.get("exploration_edges") or [])[-20:],
+        },
     }
 
     history = list(state.get("major_question_history") or [])
@@ -370,3 +508,38 @@ def _clip_user_position(text: str) -> str:
     if len(text) <= MAX_USER_POSITION_CHARS:
         return text
     return text[:MAX_USER_POSITION_CHARS].rstrip() + "..."
+
+
+def _first_nonempty(*values: Any) -> str:
+    for value in values:
+        if value not in (None, "", [], {}):
+            return str(value).strip()
+    return ""
+
+
+def _safe_id(value: Any, prefix: str, seed: str) -> str:
+    if isinstance(value, str):
+        candidate = value.strip()
+        if re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", candidate):
+            return candidate
+    digest = hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"{prefix}:{digest}"
+
+
+def _clip_text(value: Any, limit: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _dedupe_by_key(items: List[Dict[str, Any]], key: str) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    seen = set()
+    for item in items:
+        item_key = item.get(key)
+        if not item_key or item_key in seen:
+            continue
+        result.append(item)
+        seen.add(item_key)
+    return result

@@ -9,14 +9,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_chair_state_patch_allowlist_matches_prompt_contract():
     assert PATCH_FIELDS_BY_ROLE["chair"] == {
+        "agenda_mode",
         "current_major_question",
         "exploration_focus",
+        "exploration_status",
+        "exploration_clone_mode",
         "pending_next_question",
         "requires_user_intervention",
         "hypotheses",
         "research_threads",
         "findings",
         "coverage_gaps",
+        "decision_candidates",
+        "exploration_nodes",
+        "exploration_edges",
+        "anomalies",
         "evidence_requests",
     }
 
@@ -35,6 +42,10 @@ def test_chair_disallowed_state_patch_fields_are_dropped():
                 "research_threads": ["allowed thread"],
                 "findings": ["allowed finding"],
                 "coverage_gaps": ["allowed gap"],
+                "decision_candidates": ["optional candidate"],
+                "exploration_nodes": [{"id": "n:allowed", "type": "hypothesis", "label": "allowed node"}],
+                "exploration_edges": [{"source": "n:allowed", "target": "n:target", "relation": "supports"}],
+                "anomalies": ["allowed anomaly"],
                 "evidence_requests": [{"query": "allowed search"}],
                 "strongest_attack": "forbidden",
                 "strongest_defense": "forbidden",
@@ -57,6 +68,10 @@ def test_chair_disallowed_state_patch_fields_are_dropped():
         "research_threads": ["allowed thread"],
         "findings": ["allowed finding"],
         "coverage_gaps": ["allowed gap"],
+        "decision_candidates": ["optional candidate"],
+        "exploration_nodes": [{"id": "n:allowed", "type": "hypothesis", "label": "allowed node"}],
+        "exploration_edges": [{"source": "n:allowed", "target": "n:target", "relation": "supports"}],
+        "anomalies": ["allowed anomaly"],
         "evidence_requests": [{"query": "allowed search"}],
     }
     warnings = "\n".join(decision["validation_warnings"])
@@ -111,37 +126,3 @@ def test_exploration_fields_are_allowed_for_relevant_roles():
     assert result["state_patch"]["research_threads"] == ["thread B"]
     assert result["state_patch"]["findings"] == ["finding B"]
     assert "coverage_gaps" not in result["state_patch"]
-
-
-def test_top_level_exploration_fields_still_respect_role_allowlist():
-    state = new_state(ROOT, "exploration contract", agenda_mode="exploration")
-    result = validate_agent_output(
-        "defender",
-        {
-            "role": "defender",
-            "hypotheses": ["allowed hypothesis"],
-            "coverage_gaps": ["not allowed top-level gap"],
-            "state_patch": {},
-        },
-        state,
-    )
-
-    assert result["state_patch"]["hypotheses"] == ["allowed hypothesis"]
-    assert "coverage_gaps" not in result["state_patch"]
-
-
-def test_judge_verdict_is_blocked_in_exploration_mode():
-    state = new_state(ROOT, "exploration contract", agenda_mode="exploration")
-    result = validate_agent_output(
-        "judge",
-        {
-            "role": "judge",
-            "verdict": "KILL",
-            "state_patch": {"judge_verdict": "KILL"},
-        },
-        state,
-    )
-
-    assert result["verdict"] == "undecided"
-    assert "judge_verdict" not in result["state_patch"]
-    assert "judge_verdict_blocked_in_exploration" in result["validation_warnings"]

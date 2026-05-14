@@ -25,8 +25,9 @@ state + recent turns + 当前任务 + 同一角色的多个 clone outputs
 
 当 `state.agenda_mode = exploration` 时，合并目标不是选出唯一 strongest point，而是保留高价值多样性：
 
-- 合并 `hypotheses / research_threads / findings / coverage_gaps / evidence_requests`。
-- 不要因为多数 clone 相似就删除少数但重要的反例、术语边界或相邻领域。
+- 合并 `hypotheses / research_threads / findings / coverage_gaps / decision_candidates / exploration_nodes / exploration_edges / anomalies / evidence_requests`。
+- 不要因为多数 clone 相似就删除少数但重要的反例、术语边界、异常点或相邻领域。
+- exploration 排序应多样性优先：低共识但高异常性或能打开新分支的点，优先于重复的高共识普通点。
 - `strongest_point` 可以记录当前最值得继续追踪的线索，但不得覆盖探索地图。
 - 不要写 `judge_verdict`，不要把多个开放线索强行收束成 verdict。
 - 如果 clone 输出暗含“可以转成 decision node”，把它写入 `open_questions`，等待用户选择。
@@ -78,6 +79,10 @@ state + recent turns + 当前任务 + 同一角色的多个 clone outputs
     "research_threads": [],
     "findings": [],
     "coverage_gaps": [],
+    "decision_candidates": [],
+    "exploration_nodes": [],
+    "exploration_edges": [],
+    "anomalies": [],
     "evidence_requests": []
   }
 }

@@ -25,7 +25,16 @@ VERDICT_TIEBREAK = {
     "BUILD": 1,
     "undecided": 0,
 }
-EXPLORATION_LIST_FIELDS = ("hypotheses", "research_threads", "findings", "coverage_gaps")
+EXPLORATION_LIST_FIELDS = (
+    "hypotheses",
+    "research_threads",
+    "findings",
+    "coverage_gaps",
+    "decision_candidates",
+    "exploration_nodes",
+    "exploration_edges",
+    "anomalies",
+)
 
 
 def _nonempty(values: Iterable[Any]) -> List[Any]:
@@ -57,10 +66,17 @@ def _stable_key(item: Any) -> str:
 def merge_clone_outputs(role: str, state: Dict[str, Any], outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
     raw_points = _collect_structured_points(role, outputs)
     points, duplicates_removed = _merge_duplicate_points(raw_points)
-    sorted_points = sorted(
-        points,
-        key=lambda item: (-item["score"], -item["support_count"], item["first_seen_index"]),
-    )
+    exploration_mode = str(state.get("agenda_mode") or "decision") == "exploration"
+    if exploration_mode:
+        sorted_points = sorted(
+            points,
+            key=lambda item: (-_exploration_priority(item), item["first_seen_index"], item["claim"]),
+        )
+    else:
+        sorted_points = sorted(
+            points,
+            key=lambda item: (-item["score"], -item["support_count"], item["first_seen_index"]),
+        )
     strongest_point = sorted_points[0]["claim"] if sorted_points else ""
     conflicts = _detect_conflicts(role, sorted_points, outputs)
     patches = [output.get("state_patch", {}) for output in outputs if isinstance(output, dict)]
@@ -139,7 +155,7 @@ def _append_exploration_items(
     output_index: int,
 ) -> None:
     for field in EXPLORATION_LIST_FIELDS:
-        _append_items(points, output.get(field), role=role, output_index=output_index)
+        _append_items(points, output.get(field), role=role, output_index=output_index, exploration_field=field)
 
 
 def _append_items(
@@ -148,18 +164,18 @@ def _append_items(
     role: str,
     output_index: int,
     fallback_claim: Any = None,
+    exploration_field: str = "",
 ) -> None:
     if not isinstance(items, list):
         items = [items] if items not in (None, "", [], {}) else []
     for item in items:
         if isinstance(item, dict):
-            claim = _text(
-                item.get("claim")
-                or item.get("proposal")
-                or item.get("point")
-                or item.get("summary")
-                or fallback_claim
-            )
+            claim = _extract_claim(item, fallback_claim=fallback_claim)
+            if exploration_field == "exploration_edges" and not claim:
+                source = item.get("source") or item.get("from") or "?"
+                relation = item.get("relation") or item.get("type") or "related_to"
+                target = item.get("target") or item.get("to") or "?"
+                claim = f"{source} {relation} {target}"
             points.append(
                 _make_point(
                     claim=claim,
@@ -167,13 +183,32 @@ def _append_items(
                     output_index=output_index,
                     severity=item.get("severity"),
                     confidence=item.get("confidence"),
-                    evidence_needed=item.get("evidence_needed"),
-                    why_it_matters=item.get("why_it_matters") or item.get("condition"),
-                    raw=item,
+                    evidence_needed=item.get("evidence_needed") or item.get("evidence") or item.get("query"),
+                    why_it_matters=item.get("why_it_matters") or item.get("condition") or item.get("reason"),
+                    raw={**item, "exploration_field": exploration_field} if exploration_field else item,
                 )
             )
         elif item not in (None, ""):
-            points.append(_make_point(_text(item), role, output_index))
+            raw = {"exploration_field": exploration_field} if exploration_field else {}
+            points.append(_make_point(_text(item), role, output_index, raw=raw))
+
+
+def _extract_claim(item: Dict[str, Any], fallback_claim: Any = None) -> str:
+    return _text(
+        item.get("claim")
+        or item.get("proposal")
+        or item.get("point")
+        or item.get("summary")
+        or item.get("label")
+        or item.get("title")
+        or item.get("name")
+        or item.get("query")
+        or item.get("hypothesis")
+        or item.get("thread")
+        or item.get("gap")
+        or item.get("anomaly")
+        or fallback_claim
+    )
 
 
 def _append_scalar(points: List[Dict[str, Any]], claim: Any, role: str, output_index: int) -> None:
@@ -204,6 +239,7 @@ def _make_point(
         why_it_matters=why_text,
         support_count=1,
     )
+    raw = raw or {}
     return {
         "claim": _text(claim),
         "role": role,
@@ -214,9 +250,10 @@ def _make_point(
         "verdict": verdict or _infer_verdict_from_text(claim),
         "support_count": 1,
         "score": score,
+        "exploration_priority": 0,
         "first_seen_index": output_index,
         "source_indexes": [output_index],
-        "raw": raw or {},
+        "raw": raw,
     }
 
 
@@ -241,6 +278,8 @@ def _merge_duplicate_points(points: List[Dict[str, Any]]) -> Tuple[List[Dict[str
             existing["confidence"] = point["confidence"]
         existing["evidence_needed"] = existing["evidence_needed"] or point["evidence_needed"]
         existing["why_it_matters"] = existing["why_it_matters"] or point["why_it_matters"]
+        if _is_anomaly_point(point) and not _is_anomaly_point(existing):
+            existing["raw"] = point.get("raw", existing.get("raw", {}))
         existing["score"] = _score_point(
             severity=existing["severity"],
             confidence=existing["confidence"],
@@ -264,6 +303,64 @@ def _score_point(
     score += 5 if why_it_matters else 0
     score += max(0, support_count - 1) * 15
     return score
+
+
+def _exploration_priority(point: Dict[str, Any]) -> int:
+    # Exploration mode should not reward convergence as strongly as decision mode.
+    # Rare-but-specific anomalies and undercovered branches should survive even if
+    # only one clone noticed them.
+    priority = _severity_value(point.get("severity")) * 20
+    priority += _confidence_value(point.get("confidence")) * 4
+    if point.get("evidence_needed"):
+        priority += 12
+    if point.get("why_it_matters"):
+        priority += 8
+    if point.get("support_count", 1) == 1:
+        priority += 18
+    else:
+        priority += min(2, int(point.get("support_count", 1))) * 4
+    if _is_anomaly_point(point):
+        priority += 80
+    field = (point.get("raw") or {}).get("exploration_field")
+    if field in {"anomalies", "coverage_gaps"}:
+        priority += 20
+    elif field in {"hypotheses", "research_threads"}:
+        priority += 12
+    elif field in {"exploration_nodes", "exploration_edges"}:
+        priority += 6
+    point["exploration_priority"] = priority
+    return priority
+
+
+def _is_anomaly_point(point: Dict[str, Any]) -> bool:
+    raw = point.get("raw") or {}
+    field = raw.get("exploration_field")
+    if field == "anomalies":
+        return True
+    text = " ".join(
+        _text(value)
+        for value in (
+            point.get("claim"),
+            point.get("why_it_matters"),
+            raw.get("type"),
+            raw.get("label"),
+            raw.get("summary"),
+        )
+    ).lower()
+    keywords = (
+        "anomaly",
+        "unexpected",
+        "edge case",
+        "outlier",
+        "surprise",
+        "contradiction",
+        "异常",
+        "反常",
+        "意外",
+        "矛盾",
+        "边缘",
+    )
+    return any(keyword in text for keyword in keywords)
 
 
 def _build_state_patch(
@@ -316,13 +413,7 @@ def _build_state_patch(
             for list_field in list_fields:
                 append_list_value(list_field, item.get(list_field, []))
 
-    for list_field in (
-        "open_questions",
-        "killed_arguments",
-        "surviving_arguments",
-        "evidence_requests",
-        *EXPLORATION_LIST_FIELDS,
-    ):
+    for list_field in list_fields:
         if list_field not in patch:
             patch[list_field] = []
         patch[list_field], _ = _dedupe_with_removed(patch[list_field])
@@ -337,7 +428,7 @@ def _build_state_patch(
         patch["best_redesign"] = strongest
     elif role == "judge":
         verdict = _choose_verdict(points, outputs)
-        if verdict and verdict != "undecided":
+        if verdict and verdict != "undecided" and not exploration_mode:
             patch["judge_verdict"] = verdict
 
     clean_patch = apply_state_patch(
@@ -352,6 +443,10 @@ def _build_state_patch(
             "research_threads": [],
             "findings": [],
             "coverage_gaps": [],
+            "decision_candidates": [],
+            "exploration_nodes": [],
+            "exploration_edges": [],
+            "anomalies": [],
         },
         patch,
     )
@@ -368,6 +463,10 @@ def _build_state_patch(
         "research_threads",
         "findings",
         "coverage_gaps",
+        "decision_candidates",
+        "exploration_nodes",
+        "exploration_edges",
+        "anomalies",
     }
     return {key: value for key, value in clean_patch.items() if key in allowed}
 
@@ -435,6 +534,14 @@ def _detect_conflicts(
         summary="One clone asks for Judge while another says the question can be closed.",
         left=("need judge", "needs judge", "run judge", "需要 judge", "需要裁决", "先裁决"),
         right=("can close", "ready to close", "close now", "可以 close", "可以收束", "关闭问题"),
+    )
+    _add_keyword_conflict(
+        conflicts,
+        texts,
+        conflict_type="exploration_terminal_conflict",
+        summary="One clone wants to convert the branch into a decision node while another says it should remain open.",
+        left=("decision node", "可裁决", "转成 decision", "裁决节点"),
+        right=("remain open", "keep open", "继续探索", "保持开放", "不能裁决"),
     )
     return conflicts
 

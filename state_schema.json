@@ -6,6 +6,8 @@
   "core_claim": "",
   "current_major_question": "",
   "exploration_focus": "",
+  "exploration_status": "paused",
+  "exploration_clone_mode": "independent",
   "major_question_history": [],
   "user_position": "",
   "strongest_attack": "",
@@ -27,6 +29,10 @@
   "research_threads": [],
   "findings": [],
   "coverage_gaps": [],
+  "decision_candidates": [],
+  "exploration_nodes": [],
+  "exploration_edges": [],
+  "anomalies": [],
   "pending_next_question": "",
   "requires_user_intervention": false
 }

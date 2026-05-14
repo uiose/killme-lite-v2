@@ -11,7 +11,10 @@ MVP CLI 支持：
 - `/start <idea>`：创建 decision session，初始化 shared state。
 - `/explore <question>`：创建 exploration session，用开放探索框架替代可裁决 decision node。
 - `/mode [exploration|decision]`：查看或切换当前 session 的议程模式。
-- `/auto <N>`：让 Chair 自动推进 N 个调度步骤。MVP 单次硬上限为 3，超过上限直接拒绝，不静默执行。
+- `/map`：显示 exploration map，包含 hypotheses、threads、findings、gaps、decision candidates、anomalies 和 relation graph 摘要。
+- `/focus <branch-or-subquestion>`：在 exploration mode 中切换探索焦点并写入 focus node。
+- `/clone-mode <independent|visible>`：控制 exploration clone 是否能看到同批 sibling 输出。
+- `/auto <N>`：让 Chair 自动推进 N 个调度步骤。decision mode 单次硬上限为 3；exploration mode 单次硬上限为 12；超过上限直接拒绝，不静默执行。
 - `/manual`：切换到 manual mode，并设置 `requires_user_intervention = true`。
 - `/exec`：手动调用单个 Executioner。
 - `/defend`：手动调用单个 Defender。
@@ -66,22 +69,30 @@ Chair 输出必须是结构化调度结果。运行时会做轻量 JSON validati
 Exploration mode 的规则：
 
 1. `current_major_question` 表示 exploration frame，不表示 verdict node。
-2. Chair 不应自动调用 Judge，也不应自动输出 `KILL / REDESIGN / TEST / BUILD`。
-3. Defender 优先生成 `hypotheses`；Executioner 优先生成 `coverage_gaps`；Builder 优先生成 `research_threads`、资料扫描计划和 `evidence_requests`。
-4. Merger 在 exploration mode 中保留多样性，不把多条线索强行合并成一个 strongest verdict。
-5. `/close` 输出 exploration synthesis，不要求 Judge 先裁决。
-6. 当某条线索足够具体，用户用 `/mode decision` 切换后再进入原 decision lifecycle。
+2. Exploration 可以长期保持 `open`，不要求最终转成 decision node。
+3. Chair 不应自动调用 Judge，也不应自动输出 `KILL / REDESIGN / TEST / BUILD`。
+4. Defender 优先生成 `hypotheses` 和机制图；Executioner 优先生成 `coverage_gaps`、反例和 `anomalies`；Builder 优先生成 `research_threads`、资料扫描计划、关系边和 `evidence_requests`。
+5. Merger 在 exploration mode 中采用多样性/异常优先，不把少数派线索仅因 support_count 低而删除。
+6. `/close` 输出 exploration synthesis，不要求 Judge 先裁决。
+7. `decision_candidates` 只是可选候选，不是 exploration 的默认终点。
+8. `/focus` 支持分支、回溯和迭代深化；`/map` 用于查看探索图。
 
 新增 state 字段：
 
 ```json
 {
   "agenda_mode": "decision",
+  "exploration_status": "open",
+  "exploration_clone_mode": "independent",
   "exploration_focus": "",
   "hypotheses": [],
   "research_threads": [],
   "findings": [],
-  "coverage_gaps": []
+  "coverage_gaps": [],
+  "decision_candidates": [],
+  "exploration_nodes": [],
+  "exploration_edges": [],
+  "anomalies": []
 }
 ```
 
@@ -183,9 +194,10 @@ clone 上限保存在 `state.clone_limits`：
 
 MVP 规则：
 
-- 默认建议 `/auto 1` 到 `/auto 3`。
-- 单次硬上限是 `/auto 3`。
-- 用户输入 `/auto 50` 时，系统拒绝执行，并解释上限原因。
+- decision mode 默认建议 `/auto 1` 到 `/auto 3`。
+- decision mode 单次硬上限是 `/auto 3`。
+- exploration mode 默认建议 `/auto 4` 到 `/auto 8`，单次硬上限是 `/auto 12`。
+- 用户输入超过当前 agenda mode 上限的值时，系统拒绝执行，并解释上限原因。
 - 每次 auto 结束后强制回到 manual mode。
 - 如果 auto 中途出现 `requires_user_intervention = true`，立即停止。
 - 如果 Chair 输出 closing statement，立即停止并等待用户。
@@ -198,12 +210,14 @@ MVP 规则：
 - 减少 state 污染；
 - 防止体验变成自动报告生成器。
 
+探索模式上限更高，是因为开放探索需要多假设生成、盲区扫描、资料路线、关系图更新和异常标记；它仍然不是无限后台运行。
+
 ## 7. 什么时候停下来等用户
 
 系统必须在以下情况停下来：
 
 - `/auto <N>` 已经执行完 N 个调度步骤；
-- `/auto <N>` 超过 `AUTO_MAX_STEPS`；
+- `/auto <N>` 超过当前 agenda mode 的 auto 上限；
 - Chair 输出了 closing statement；
 - `chair_mode = manual`；
 - `requires_user_intervention = true`；

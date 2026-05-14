@@ -8,7 +8,18 @@ VALID_DECISION_TYPES = {"call_role", "spawn_clones", "judge", "close_question", 
 VALID_VERDICTS = {"KILL", "REDESIGN", "TEST", "BUILD", "undecided"}
 VALID_CONFIDENCE = {"low", "medium", "high"}
 VALID_AGENDA_MODES = {"decision", "exploration"}
-EXPLORATION_LIST_FIELDS = {"hypotheses", "research_threads", "findings", "coverage_gaps"}
+VALID_EXPLORATION_STATUSES = {"open", "paused", "synthesized"}
+VALID_EXPLORATION_CLONE_MODES = {"independent", "visible"}
+EXPLORATION_LIST_FIELDS = {
+    "hypotheses",
+    "research_threads",
+    "findings",
+    "coverage_gaps",
+    "decision_candidates",
+    "exploration_nodes",
+    "exploration_edges",
+    "anomalies",
+}
 LIST_PATCH_FIELDS = {
     "open_questions",
     "killed_arguments",
@@ -20,6 +31,8 @@ SCALAR_PATCH_FIELDS = {
     "agenda_mode",
     "current_major_question",
     "exploration_focus",
+    "exploration_status",
+    "exploration_clone_mode",
     "strongest_attack",
     "strongest_defense",
     "best_redesign",
@@ -29,8 +42,11 @@ SCALAR_PATCH_FIELDS = {
 }
 PATCH_FIELDS_BY_ROLE = {
     "chair": {
+        "agenda_mode",
         "current_major_question",
         "exploration_focus",
+        "exploration_status",
+        "exploration_clone_mode",
         "pending_next_question",
         "requires_user_intervention",
         "evidence_requests",
@@ -38,6 +54,10 @@ PATCH_FIELDS_BY_ROLE = {
         "research_threads",
         "findings",
         "coverage_gaps",
+        "decision_candidates",
+        "exploration_nodes",
+        "exploration_edges",
+        "anomalies",
     },
     "executioner": {
         "strongest_attack",
@@ -46,6 +66,9 @@ PATCH_FIELDS_BY_ROLE = {
         "evidence_requests",
         "research_threads",
         "coverage_gaps",
+        "exploration_nodes",
+        "exploration_edges",
+        "anomalies",
     },
     "defender": {
         "strongest_defense",
@@ -55,6 +78,9 @@ PATCH_FIELDS_BY_ROLE = {
         "hypotheses",
         "research_threads",
         "findings",
+        "exploration_nodes",
+        "exploration_edges",
+        "anomalies",
     },
     "builder": {
         "best_redesign",
@@ -64,6 +90,10 @@ PATCH_FIELDS_BY_ROLE = {
         "research_threads",
         "findings",
         "coverage_gaps",
+        "decision_candidates",
+        "exploration_nodes",
+        "exploration_edges",
+        "anomalies",
     },
     "judge": {
         "judge_verdict",
@@ -71,6 +101,7 @@ PATCH_FIELDS_BY_ROLE = {
         "surviving_arguments",
         "killed_arguments",
         "evidence_requests",
+        "decision_candidates",
     },
     "merger": {
         "strongest_attack",
@@ -85,6 +116,10 @@ PATCH_FIELDS_BY_ROLE = {
         "research_threads",
         "findings",
         "coverage_gaps",
+        "decision_candidates",
+        "exploration_nodes",
+        "exploration_edges",
+        "anomalies",
     },
 }
 MAX_TEXT = 1600
@@ -190,16 +225,17 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
     evidence_requests = _list(data.get("evidence_requests"))
     if evidence_requests and "evidence_requests" not in patch:
         patch["evidence_requests"] = evidence_requests
-    _merge_top_level_exploration_fields(data, patch, role)
+    _merge_top_level_exploration_fields(data, patch)
 
     if role == "executioner":
         strongest = _text(data.get("strongest_attack"))
         killed = _list(data.get("killed_arguments"))
         open_questions = _list(data.get("open_questions"))
-        if strongest and "strongest_attack" not in patch:
-            patch["strongest_attack"] = strongest
-        if killed and "killed_arguments" not in patch:
-            patch["killed_arguments"] = killed
+        if state.get("agenda_mode") != "exploration":
+            if strongest and "strongest_attack" not in patch:
+                patch["strongest_attack"] = strongest
+            if killed and "killed_arguments" not in patch:
+                patch["killed_arguments"] = killed
         if open_questions and "open_questions" not in patch:
             patch["open_questions"] = open_questions
         return {
@@ -209,6 +245,11 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
             "strongest_attack": strongest,
             "killed_arguments": killed,
             "open_questions": open_questions,
+            "coverage_gaps": _list(data.get("coverage_gaps")),
+            "research_threads": _list(data.get("research_threads")),
+            "exploration_nodes": _list(data.get("exploration_nodes")),
+            "exploration_edges": _list(data.get("exploration_edges")),
+            "anomalies": _list(data.get("anomalies")),
             "evidence_requests": evidence_requests,
             "state_patch": patch,
             "validation_warnings": issues,
@@ -218,10 +259,11 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
         strongest = _text(data.get("strongest_defense"))
         surviving = _list(data.get("surviving_arguments"))
         open_questions = _list(data.get("open_questions"))
-        if strongest and "strongest_defense" not in patch:
-            patch["strongest_defense"] = strongest
-        if surviving and "surviving_arguments" not in patch:
-            patch["surviving_arguments"] = surviving
+        if state.get("agenda_mode") != "exploration":
+            if strongest and "strongest_defense" not in patch:
+                patch["strongest_defense"] = strongest
+            if surviving and "surviving_arguments" not in patch:
+                patch["surviving_arguments"] = surviving
         if open_questions and "open_questions" not in patch:
             patch["open_questions"] = open_questions
         return {
@@ -231,6 +273,12 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
             "strongest_defense": strongest,
             "surviving_arguments": surviving,
             "open_questions": open_questions,
+            "hypotheses": _list(data.get("hypotheses")),
+            "research_threads": _list(data.get("research_threads")),
+            "findings": _list(data.get("findings")),
+            "exploration_nodes": _list(data.get("exploration_nodes")),
+            "exploration_edges": _list(data.get("exploration_edges")),
+            "anomalies": _list(data.get("anomalies")),
             "evidence_requests": evidence_requests,
             "state_patch": patch,
             "validation_warnings": issues,
@@ -240,10 +288,11 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
         best = _text(data.get("best_redesign"))
         surviving = _list(data.get("surviving_arguments"))
         open_questions = _list(data.get("open_questions"))
-        if best and "best_redesign" not in patch:
-            patch["best_redesign"] = best
-        if surviving and "surviving_arguments" not in patch:
-            patch["surviving_arguments"] = surviving
+        if state.get("agenda_mode") != "exploration":
+            if best and "best_redesign" not in patch:
+                patch["best_redesign"] = best
+            if surviving and "surviving_arguments" not in patch:
+                patch["surviving_arguments"] = surviving
         if open_questions and "open_questions" not in patch:
             patch["open_questions"] = open_questions
         return {
@@ -253,6 +302,13 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
             "best_redesign": best,
             "surviving_arguments": surviving,
             "open_questions": open_questions,
+            "research_threads": _list(data.get("research_threads")),
+            "findings": _list(data.get("findings")),
+            "coverage_gaps": _list(data.get("coverage_gaps")),
+            "decision_candidates": _list(data.get("decision_candidates")),
+            "exploration_nodes": _list(data.get("exploration_nodes")),
+            "exploration_edges": _list(data.get("exploration_edges")),
+            "anomalies": _list(data.get("anomalies")),
             "evidence_requests": evidence_requests,
             "state_patch": patch,
             "validation_warnings": issues,
@@ -260,17 +316,16 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
 
     if role == "judge":
         verdict = normalize_verdict(data.get("verdict"), default="undecided")
+        if state.get("agenda_mode") == "exploration":
+            verdict = "undecided"
         confidence = str(data.get("confidence") or "medium").strip().lower()
         if confidence not in VALID_CONFIDENCE:
             issues.append("invalid_confidence_normalized")
             confidence = "medium"
-        if (state or {}).get("agenda_mode") == "exploration":
-            if verdict != "undecided" or patch.get("judge_verdict"):
-                issues.append("judge_verdict_blocked_in_exploration")
-            verdict = "undecided"
-            patch.pop("judge_verdict", None)
-        elif verdict != "undecided":
+        if verdict != "undecided":
             patch["judge_verdict"] = verdict
+        else:
+            patch.pop("judge_verdict", None)
         return {
             "role": "judge",
             "verdict": verdict,
@@ -292,11 +347,8 @@ def validate_agent_output(role: str, raw: Any, state: Dict[str, Any]) -> Dict[st
     }
 
 
-def _merge_top_level_exploration_fields(data: Dict[str, Any], patch: Dict[str, Any], source_role: str) -> None:
-    allowed = PATCH_FIELDS_BY_ROLE.get(source_role, set())
+def _merge_top_level_exploration_fields(data: Dict[str, Any], patch: Dict[str, Any]) -> None:
     for field in EXPLORATION_LIST_FIELDS:
-        if field not in allowed:
-            continue
         values = _list(data.get(field))
         if values and field not in patch:
             patch[field] = values
@@ -321,6 +373,14 @@ def sanitize_state_patch(raw: Any, state: Optional[Dict[str, Any]] = None, sourc
             agenda_mode = normalize_agenda_mode(value)
             if agenda_mode:
                 patch[key] = agenda_mode
+        elif key == "exploration_status":
+            status = normalize_exploration_status(value)
+            if status:
+                patch[key] = status
+        elif key == "exploration_clone_mode":
+            clone_mode = normalize_exploration_clone_mode(value)
+            if clone_mode:
+                patch[key] = clone_mode
         elif key == "judge_verdict":
             verdict = normalize_verdict(value, default="undecided")
             if verdict != "undecided":
@@ -421,6 +481,41 @@ def normalize_agenda_mode(value: Any) -> str:
     return raw if raw in VALID_AGENDA_MODES else ""
 
 
+def normalize_exploration_status(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "active": "open",
+        "continue": "open",
+        "ongoing": "open",
+        "map_open": "open",
+        "pause": "paused",
+        "stopped": "paused",
+        "closed": "synthesized",
+        "synthesis": "synthesized",
+        "summarized": "synthesized",
+    }
+    raw = aliases.get(raw, raw)
+    return raw if raw in VALID_EXPLORATION_STATUSES else ""
+
+
+def normalize_exploration_clone_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "shared": "visible",
+        "collaborative": "visible",
+        "collab": "visible",
+        "sequential": "visible",
+        "visible_context": "visible",
+        "可见": "visible",
+        "协作": "visible",
+        "isolated": "independent",
+        "parallel": "independent",
+        "独立": "independent",
+    }
+    raw = aliases.get(raw, raw)
+    return raw if raw in VALID_EXPLORATION_CLONE_MODES else ""
+
+
 def normalize_verdict(value: Any, default: str = "undecided") -> str:
     if value is None:
         return default
@@ -473,7 +568,6 @@ def _to_bool(value: Any, default: bool) -> bool:
     return default
 
 
-
 def _markdown(value: Any) -> str:
     if value is None:
         return ""
@@ -485,6 +579,7 @@ def _markdown(value: Any) -> str:
     if len(text) > MAX_TEXT * 4:
         return text[: MAX_TEXT * 4].rstrip() + "..."
     return text
+
 
 def _text(value: Any) -> str:
     if value is None:
@@ -508,8 +603,8 @@ def _list(value: Any) -> List[Any]:
         if item in (None, "", [], {}):
             continue
         if isinstance(item, dict):
-            # Keep small structured claims from agents, but clip every string field.
-            result.append({str(k): _text(v) for k, v in item.items()})
+            # Keep small structured claims from agents, but clip nested string values.
+            result.append({str(k): _text(v) for k, v in item.items() if v not in (None, "", [], {})})
         else:
             text = _text(item)
             if text:

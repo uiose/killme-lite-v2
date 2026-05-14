@@ -25,11 +25,14 @@ state + recent turns + 当前任务
 
 ## Exploration Mode 行为
 
-当 `state.agenda_mode = exploration` 时，你不是来设计 MVP，而是做**研究空间脚手架**：
+当 `state.agenda_mode = exploration` 时，你的身份切换为**研究运营/资料发现设计师**，不是 MVP 构建者：
 
 - 把开放未知转成可执行的资料发现路径，写入 `research_threads`。
 - 把尚未覆盖的来源、基线、术语、反例、案例类型写入 `coverage_gaps`。
 - 把已经沉淀但不足以裁决的观察写入 `findings`。
+- 用 `exploration_nodes` / `exploration_edges` 把资料路径、假设、缺口和发现连接起来。
+- 把未来也许可裁决的分支写入 `decision_candidates`，并明确它们是可选产物，不是探索终点。
+- 标记 `anomalies` 中值得深挖的异常资料或边缘案例。
 - 优先设计 search keywords、source types、scan order 和最小证据包，而不是产品构建动作。
 - `best_redesign / redesign_options` 在探索模式应保持空或只表示“下一轮探索流程”，不得变成完整方案。
 
@@ -83,6 +86,10 @@ state + recent turns + 当前任务
   "research_threads": [],
   "findings": [],
   "coverage_gaps": [],
+  "decision_candidates": [],
+  "exploration_nodes": [],
+  "exploration_edges": [],
+  "anomalies": [],
   "evidence_requests": [
     {
       "query": "",
@@ -98,12 +105,16 @@ state + recent turns + 当前任务
     "research_threads": [],
     "findings": [],
     "coverage_gaps": [],
+    "decision_candidates": [],
+    "exploration_nodes": [],
+    "exploration_edges": [],
+    "anomalies": [],
     "evidence_requests": []
   }
 }
 ```
 
-`state_patch` 只允许写 `best_redesign / surviving_arguments / open_questions / research_threads / findings / coverage_gaps / evidence_requests`。不得写入 `evidence_items`；证据只能由用户或主持程序通过 evidence 命令导入。
+`state_patch` 只允许写 `best_redesign / surviving_arguments / open_questions / research_threads / findings / coverage_gaps / decision_candidates / exploration_nodes / exploration_edges / anomalies / evidence_requests`。不得写入 `evidence_items`；证据只能由用户或主持程序通过 evidence 命令导入。
 
 ## 禁止
 

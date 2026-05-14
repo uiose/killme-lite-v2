@@ -54,14 +54,27 @@ class LLMClient:
         current_task: str,
         clone_name: Optional[str] = None,
         angle: Optional[str] = None,
+        clone_context_mode: str = "independent",
     ) -> Dict[str, Any]:
+        if clone_context_mode == "visible":
+            runtime_rule = (
+                "Exploration visible clone mode: later clones may see earlier sibling outputs in recent_turns, "
+                "but no sibling state_patch has been applied to shared state until Merger runs. Extend, contrast, "
+                "or branch from prior outputs; do not merely repeat them."
+            )
+        else:
+            runtime_rule = (
+                "If this is a clone call, all clones in the same group receive an identical frozen state snapshot. "
+                "Do not rely on sibling clone output."
+            )
         payload = {
             "state": state,
             "recent_turns": recent_turns,
             "current_task": current_task,
             "clone_name": clone_name,
             "angle": angle,
-            "important_runtime_rule": "If this is a clone call, all clones in the same group receive an identical frozen state snapshot. Do not rely on sibling clone output.",
+            "clone_context_mode": clone_context_mode,
+            "important_runtime_rule": runtime_rule,
         }
 
         if self.force_mock or not self._provider(self._current_provider_name()).api_key:
@@ -356,10 +369,32 @@ def mock_exploration_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]
     angle = payload.get("angle") or "exploratory angle"
     focus = state.get("exploration_focus") or state.get("core_claim") or "这个开放问题"
     question = state.get("current_major_question") or focus
+    focus_node = {
+        "id": "focus:current",
+        "type": "focus",
+        "label": focus,
+        "summary": "当前开放探索主题",
+        "status": state.get("exploration_status") or "open",
+    }
 
     if role == "executioner":
         gap = f"{angle}: 当前探索容易把「{focus}」过早化约成单一可裁决问题，缺少反例、相邻领域和术语边界扫描。"
         thread = f"沿着「{question}」寻找反例、边界案例、失败定义和不可比基线。"
+        anomaly = "异常标记：如果某个反例同时支持两种相反解释，应先深挖而不是并入多数假设。"
+        gap_node = {"id": "gap:premature-closure", "type": "gap", "label": gap, "source_role": "executioner"}
+        thread_node = {"id": "thread:counterexamples", "type": "thread", "label": thread, "source_role": "executioner"}
+        edges = [
+            {"source": "focus:current", "target": "gap:premature-closure", "relation": "has_gap", "summary": "探索主题存在过早收敛风险。"},
+            {"source": "gap:premature-closure", "target": "thread:counterexamples", "relation": "can_be_probed_by", "summary": "用反例与边界案例扫描填补缺口。"},
+        ]
+        evidence_requests = [
+            {
+                "query": f"{focus} survey review competing hypotheses",
+                "reason": "探索模式需要先扫相邻概念、综述和竞争解释，而不是直接裁决。",
+                "source_type": "web",
+                "priority": "medium",
+            }
+        ]
         return {
             "role": "executioner",
             "task_understood": task,
@@ -369,26 +404,18 @@ def mock_exploration_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]
             "open_questions": ["哪些问题目前还不能被压成 yes/no 或 verdict？"],
             "coverage_gaps": [gap],
             "research_threads": [thread],
-            "evidence_requests": [
-                {
-                    "query": f"{focus} survey review competing hypotheses",
-                    "reason": "探索模式需要先扫相邻概念、综述和竞争解释，而不是直接裁决。",
-                    "source_type": "web",
-                    "priority": "medium",
-                }
-            ],
+            "anomalies": [anomaly],
+            "exploration_nodes": [focus_node, gap_node, thread_node],
+            "exploration_edges": edges,
+            "evidence_requests": evidence_requests,
             "state_patch": {
                 "coverage_gaps": [gap],
                 "research_threads": [thread],
+                "anomalies": [anomaly],
+                "exploration_nodes": [focus_node, gap_node, thread_node],
+                "exploration_edges": edges,
                 "open_questions": ["哪些问题目前还不能被压成 yes/no 或 verdict？"],
-                "evidence_requests": [
-                    {
-                        "query": f"{focus} survey review competing hypotheses",
-                        "reason": "探索模式需要先扫相邻概念、综述和竞争解释，而不是直接裁决。",
-                        "source_type": "web",
-                        "priority": "medium",
-                    }
-                ],
+                "evidence_requests": evidence_requests,
             },
         }
 
@@ -396,6 +423,14 @@ def mock_exploration_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]
         hypothesis = f"{angle}: {focus} 可能不是单一方案问题，而是一组待分解的机制、情境和评价标准。"
         thread = f"把「{focus}」拆成定义、现象、机制、可观察信号和已有研究传统五条线。"
         finding = "探索阶段的核心收益是保留多种解释路径，避免把资料不足误判为方案失败。"
+        hyp_node = {"id": "hypothesis:multi-mechanism", "type": "hypothesis", "label": hypothesis, "source_role": "defender"}
+        thread_node = {"id": "thread:decompose-five-lines", "type": "thread", "label": thread, "source_role": "defender"}
+        finding_node = {"id": "finding:preserve-plurality", "type": "finding", "label": finding, "source_role": "defender"}
+        edges = [
+            {"source": "focus:current", "target": "hypothesis:multi-mechanism", "relation": "may_be_explained_by", "summary": "开放主题可由多机制解释。"},
+            {"source": "hypothesis:multi-mechanism", "target": "thread:decompose-five-lines", "relation": "needs_probe", "summary": "该假设需要拆分定义、现象、机制、信号、传统。"},
+            {"source": "finding:preserve-plurality", "target": "hypothesis:multi-mechanism", "relation": "supports", "summary": "保留多解释路径支持继续探索。"},
+        ]
         return {
             "role": "defender",
             "task_understood": task,
@@ -406,18 +441,39 @@ def mock_exploration_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]
             "hypotheses": [hypothesis],
             "research_threads": [thread],
             "findings": [finding],
+            "exploration_nodes": [focus_node, hyp_node, thread_node, finding_node],
+            "exploration_edges": edges,
             "state_patch": {
                 "hypotheses": [hypothesis],
                 "research_threads": [thread],
                 "findings": [finding],
+                "exploration_nodes": [focus_node, hyp_node, thread_node, finding_node],
+                "exploration_edges": edges,
                 "open_questions": ["有哪些互相竞争但目前都还合理的解释？"],
             },
         }
 
     if role == "builder":
         thread = "用 30-60 分钟做第一轮资料发现：关键词、综述/README/benchmark、反例、相邻术语各至少 2 条。"
-        gap = "还没有足够资料判断哪些分支值得转成 decision node。"
-        finding = "下一步不是构建 MVP，而是降低未知空间：先找资料、聚类假设、再选择可裁决节点。"
+        gap = "还没有足够资料判断哪些分支值得转成 decision node；探索可以继续积累，不必强行转化。"
+        finding = "下一步不是构建 MVP，而是降低未知空间：先找资料、聚类假设、再选择是否需要可裁决节点。"
+        candidate = f"候选 decision node（可选而非终点）：在特定语境下，{focus} 的哪一种机制最值得验证？"
+        thread_node = {"id": "thread:first-source-scan", "type": "thread", "label": thread, "source_role": "builder"}
+        gap_node = {"id": "gap:not-enough-evidence", "type": "gap", "label": gap, "source_role": "builder"}
+        candidate_node = {"id": "candidate:specific-mechanism-test", "type": "decision_candidate", "label": candidate, "source_role": "builder"}
+        edges = [
+            {"source": "focus:current", "target": "thread:first-source-scan", "relation": "needs_scan", "summary": "先做资料扫描而不是构建。"},
+            {"source": "thread:first-source-scan", "target": "gap:not-enough-evidence", "relation": "may_reduce", "summary": "资料扫描可降低证据缺口。"},
+            {"source": "thread:first-source-scan", "target": "candidate:specific-mechanism-test", "relation": "may_generate", "summary": "扫描后可能生成可选裁决节点。"},
+        ]
+        evidence_requests = [
+            {
+                "query": f"{focus} benchmark dataset baseline implementation",
+                "reason": "需要基线、数据集、已有实现或评价方式来判断哪些分支值得继续。",
+                "source_type": "web",
+                "priority": "medium",
+            }
+        ]
         return {
             "role": "builder",
             "task_understood": task,
@@ -428,27 +484,19 @@ def mock_exploration_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]
             "research_threads": [thread],
             "coverage_gaps": [gap],
             "findings": [finding],
-            "evidence_requests": [
-                {
-                    "query": f"{focus} benchmark dataset baseline implementation",
-                    "reason": "需要基线、数据集、已有实现或评价方式来决定后续是否可裁决。",
-                    "source_type": "web",
-                    "priority": "medium",
-                }
-            ],
+            "decision_candidates": [candidate],
+            "exploration_nodes": [focus_node, thread_node, gap_node, candidate_node],
+            "exploration_edges": edges,
+            "evidence_requests": evidence_requests,
             "state_patch": {
                 "research_threads": [thread],
                 "coverage_gaps": [gap],
                 "findings": [finding],
+                "decision_candidates": [candidate],
+                "exploration_nodes": [focus_node, thread_node, gap_node, candidate_node],
+                "exploration_edges": edges,
                 "open_questions": ["哪条研究线索最值得先补证据？"],
-                "evidence_requests": [
-                    {
-                        "query": f"{focus} benchmark dataset baseline implementation",
-                        "reason": "需要基线、数据集、已有实现或评价方式来决定后续是否可裁决。",
-                        "source_type": "web",
-                        "priority": "medium",
-                    }
-                ],
+                "evidence_requests": evidence_requests,
             },
         }
 
@@ -457,12 +505,12 @@ def mock_exploration_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]
             "role": "judge",
             "verdict": "undecided",
             "confidence": "low",
-            "reasoning_summary": "当前是 exploration mode，尚不适合给 KILL/REDESIGN/TEST/BUILD。",
-            "what_would_change_the_verdict": "选择一条具体假设、导入必要证据，并切换 /mode decision。",
-            "next_validation_action": "继续资料扫描或将一条研究线索转成可裁决问题。",
+            "reasoning_summary": "当前是 exploration mode，Judge 只能评估是否适合转入 decision mode，不能给 KILL/REDESIGN/TEST/BUILD。",
+            "what_would_change_the_verdict": "选择一条具体假设、导入必要证据，并由用户显式切换 /mode decision。",
+            "next_validation_action": "继续资料扫描、扩展探索图，或把某一条分支作为候选 decision node。",
             "evidence_requests": [],
             "state_patch": {
-                "open_questions": ["要把哪条探索线索切换成 decision node？"]
+                "open_questions": ["要继续开放探索，还是把哪条探索线索切换成 decision node？"]
             },
         }
 
@@ -472,15 +520,28 @@ def mock_exploration_agent(role: str, payload: Dict[str, Any]) -> Dict[str, Any]
 def mock_chair(state: Dict[str, Any], task: str) -> Dict[str, Any]:
     task_lower = task.lower()
     if "initial major question" in task_lower or "initial exploration" in task_lower or "bootstrap" in task_lower:
-        question = _mock_initial_major_question(state)
+        question = _mock_initial_exploration_frame(state) if state.get("agenda_mode") == "exploration" else _mock_initial_major_question(state)
         state_patch = {"current_major_question": question}
         if state.get("agenda_mode") == "exploration":
             focus = state.get("exploration_focus") or state.get("core_claim", "")
             state_patch.update(
                 {
+                    "agenda_mode": "exploration",
                     "exploration_focus": focus,
+                    "exploration_status": "open",
                     "research_threads": ["定义与边界", "竞争性假设", "资料与基线扫描"],
                     "coverage_gaps": ["尚未导入资料，不能裁决。"],
+                    "exploration_nodes": [
+                        {"id": "focus:current", "type": "focus", "label": focus, "summary": "当前开放探索主题"},
+                        {"id": "thread:definitions", "type": "thread", "label": "定义与边界"},
+                        {"id": "thread:hypotheses", "type": "thread", "label": "竞争性假设"},
+                        {"id": "thread:sources", "type": "thread", "label": "资料与基线扫描"},
+                    ],
+                    "exploration_edges": [
+                        {"source": "focus:current", "target": "thread:definitions", "relation": "needs_definition"},
+                        {"source": "focus:current", "target": "thread:hypotheses", "relation": "needs_hypotheses"},
+                        {"source": "focus:current", "target": "thread:sources", "relation": "needs_sources"},
+                    ],
                 }
             )
         return {
@@ -527,16 +588,21 @@ def mock_chair(state: Dict[str, Any], task: str) -> Dict[str, Any]:
                 "让 Defender 生成互相竞争的解释和相邻概念。",
                 agenda_mode="exploration",
             )
-        if not state.get("coverage_gaps"):
+        if not state.get("coverage_gaps") or not state.get("anomalies"):
             count = min(3, int(limits.get("executioner", 1)))
             return _chair_call(
                 "executioner",
                 count,
-                "已有初步假设，下一步扫描盲区和过早收敛风险。",
-                "让 Executioner 找资料缺口、反例和边界。",
+                "已有初步假设，下一步扫描盲区、异常点和过早收敛风险。",
+                "让 Executioner 找资料缺口、反例、边界和异常信号。",
                 agenda_mode="exploration",
             )
-        if not state.get("research_threads") or len(state.get("research_threads") or []) < 3:
+        if (
+            not state.get("research_threads")
+            or len(state.get("research_threads") or []) < 4
+            or not state.get("exploration_edges")
+            or not state.get("decision_candidates")
+        ):
             count = min(2, int(limits.get("builder", 1)))
             return _chair_call(
                 "builder",
@@ -551,10 +617,10 @@ def mock_chair(state: Dict[str, Any], task: str) -> Dict[str, Any]:
             "role_to_call": None,
             "clone_count": 0,
             "clone_tasks": [],
-            "reason": "探索地图已有初步假设、线索和缺口；下一步需要用户补 evidence 或选择线索。",
+            "reason": "探索地图已有初步假设、线索、缺口和关系；下一步需要用户补 evidence、选择焦点，或继续开放探索。",
             "requires_user_intervention": True,
-            "message_to_user": "请选择一条研究线索继续补资料，或用 /mode decision 把它转成可裁决问题。",
-            "state_patch": {"requires_user_intervention": True},
+            "message_to_user": "请选择一条研究线索继续补资料，运行 /focus 深挖分支，或继续 /auto 扩展探索图；/mode decision 只是可选路径。",
+            "state_patch": {"requires_user_intervention": True, "exploration_status": "open"},
             "closing_statement": None,
         }
 
@@ -585,6 +651,13 @@ def mock_chair(state: Dict[str, Any], task: str) -> Dict[str, Any]:
         }
 
     return _mock_chair_close(state)
+
+
+def _mock_initial_exploration_frame(state: Dict[str, Any]) -> str:
+    focus = str(state.get("exploration_focus") or state.get("core_claim") or "这个开放问题").strip()
+    if len(focus) > 80:
+        focus = focus[:77].rstrip() + "..."
+    return f"围绕「{focus}」，哪些定义、竞争性解释、相邻领域、证据关系和异常点值得先展开，而不急于形成裁决？"
 
 
 def _mock_initial_major_question(state: Dict[str, Any]) -> str:
@@ -638,7 +711,7 @@ def _clone_tasks(role: str, count: int, agenda_mode: str = "decision") -> List[D
                 "identify what remains too open to judge",
             ],
         }.get(role, ["default exploratory angle"])
-        task_prefix = "Explore current frame from this independent angle only"
+        task_prefix = "Expand the exploration map from this angle"
     else:
         angles = {
             "executioner": [
@@ -701,14 +774,21 @@ Coverage gaps:
 Evidence requests:
 {json.dumps(state.get('evidence_requests') or [], ensure_ascii=False, indent=2)}
 
-Candidate decision nodes:
-{'; '.join(state.get('open_questions') or ['选择一条研究线索，切换 /mode decision 后再裁决。'])}
+Decision candidates, optional:
+{'; '.join(state.get('decision_candidates') or state.get('open_questions') or ['暂无；探索可以继续，不必强行转成裁决。'])}
+
+Anomalies / weak signals:
+{'; '.join(state.get('anomalies') or ['暂无明确异常点。'])}
+
+Graph snapshot:
+- nodes: {len(state.get('exploration_nodes') or [])}
+- edges: {len(state.get('exploration_edges') or [])}
 
 Mode recommendation:
 MANUAL
 
 Reason:
-探索模式的关闭动作只是阶段性地图综合，不输出 verdict。"""
+探索模式的关闭动作只是阶段性地图综合，不输出 verdict；session 仍可继续开放积累。"""
     return {
         "role": "chair",
         "decision_type": "close_question",
@@ -717,8 +797,8 @@ Reason:
         "clone_tasks": [],
         "reason": "探索模式阶段性综合，不裁决。",
         "requires_user_intervention": True,
-        "message_to_user": "已综合当前探索地图；下一步补 evidence 或选择线索转入 decision mode。",
-        "state_patch": {"requires_user_intervention": True},
+        "message_to_user": "已综合当前探索地图；下一步可以补 evidence、/focus 深挖分支，或继续开放探索。",
+        "state_patch": {"requires_user_intervention": True, "exploration_status": "synthesized"},
         "closing_statement": closing,
     }
 

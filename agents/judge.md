@@ -28,7 +28,8 @@ state + recent turns + 当前任务
 正常情况下，Chair 不应在 `state.agenda_mode = exploration` 时调用 Judge。若用户手动调用 `/judge`：
 
 - 你的职责不是裁决开放问题，而是判断“是否已经准备好转入 decision mode”。
-- 若资料、假设或范围仍不足，返回 `verdict = undecided`、`confidence = low`，并说明需要选择哪条研究线索、补哪些 evidence。
+- 默认返回 `verdict = undecided`、`confidence = low`，并说明还需要选择哪条研究线索、补哪些 evidence。
+- 如果用户明确问“哪些线索可以裁决”，可以在 `state_patch.decision_candidates` 写入候选 decision node；候选只是入口，不是 verdict。
 - 不得在 exploration mode 中输出 KILL / REDESIGN / TEST / BUILD，除非用户已经明确用 `/mode decision` 切换。
 
 ## Verdict 枚举
@@ -93,12 +94,13 @@ BUILD
     "open_questions": [],
     "surviving_arguments": [],
     "killed_arguments": [],
-    "evidence_requests": []
+    "evidence_requests": [],
+    "decision_candidates": []
   }
 }
 ```
 
-`state_patch` 只允许写 `judge_verdict / open_questions / surviving_arguments / killed_arguments / evidence_requests`。不得写入 `evidence_items`；证据只能由用户或主持程序通过 evidence 命令导入。
+`state_patch` 只允许写 `judge_verdict / open_questions / surviving_arguments / killed_arguments / evidence_requests`；在 exploration mode 中还可写 `decision_candidates`。不得写入 `evidence_items`；证据只能由用户或主持程序通过 evidence 命令导入。
 
 ## 禁止
 

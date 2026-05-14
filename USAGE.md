@@ -35,10 +35,12 @@ uv run python main.py  # 启动
 
 ```text
 /explore killme-lite 的 prompt 和议程机制是否会过早压缩探索性问题
-/auto 3
+/clone-mode visible
+/auto 6
+/map
+/focus 角色身份与开放研究任务是否错配
 /evidence requests
 /summary
-/mode decision
 ```
 
 退出：
@@ -49,7 +51,7 @@ uv run python main.py  # 启动
 
 `/start` 会先创建 decision session，然后由 Chair 根据你的 idea 生成一个 topic-specific 的第一轮 `current_major_question`。如果真实 LLM 不可用，runtime 会降级到本地兜底问题，保证 session 仍能创建。
 
-`/explore` 会创建 exploration session。它不自动 Judge，不输出 `KILL / REDESIGN / TEST / BUILD`，而是维护 `hypotheses / research_threads / findings / coverage_gaps`。当某条线索足够具体后，用 `/mode decision` 回到可裁决议程。
+`/explore` 会创建 exploration session。它不自动 Judge，不输出 `KILL / REDESIGN / TEST / BUILD`，而是维护 `hypotheses / research_threads / findings / coverage_gaps / anomalies` 以及 `exploration_nodes / exploration_edges` 关系图。它可以长期保持开放；`decision_candidates` 只是可选候选，不是默认终点。
 
 ---
 
@@ -491,7 +493,12 @@ uv run python main.py --db ./data/real-llm-smoke.sqlite
 | 命令 | 作用 | 何时使用 |
 |---|---|---|
 | `/start <idea>` | 创建新的审议 session，并让 Chair 生成第一轮 topic-specific `current_major_question` | 开始审查一个新想法、方案或决策 |
-| `/auto <n>` | 让 Chair 自动推进最多 `n` 个调度步骤，当前单次上限是 3 | 你愿意让系统继续推进，但仍想限制自动运行范围 |
+| `/explore <question>` | 创建 exploration session，并生成初始探索框架 | 问题还开放，不适合马上裁决 |
+| `/mode [exploration|decision]` | 查看或切换当前 session 的议程模式 | 在开放探索和可裁决审议之间切换 |
+| `/map` | 显示探索地图，包含关系图、异常、候选节点 | 你想查看研究空间，而不只是 state JSON |
+| `/focus <branch-or-subquestion>` | 在 exploration mode 中聚焦某个分支或子问题 | 新资料或异常线索出现后需要回溯/深化 |
+| `/clone-mode <independent|visible>` | 控制 exploration clone 是否能看到 sibling 输出 | 独立评审用 independent，协作头脑风暴用 visible |
+| `/auto <n>` | 让 Chair 自动推进最多 `n` 个调度步骤；decision 上限 3，exploration 上限 12 | 你愿意让系统继续推进，但仍想限制自动运行范围 |
 | `/manual` | 切回 manual mode，并要求系统等待用户 | 你想暂停自动推进，自己决定下一步 |
 | `/exec` | 手动调用一次 Executioner | 你想先看最强攻击、失败路径、反例和证据缺口 |
 | `/defend` | 手动调用一次 Defender | 已有攻击后，想看这个想法还有哪些诚实成立的部分 |
@@ -541,9 +548,9 @@ uv run python main.py --db ./data/real-llm-smoke.sqlite
 
 角色如果发现需要外部论文、benchmark、repo 或文档，只能把关键词和理由写入 `evidence_requests`。由你或外部主持程序下载、摘录，再通过 `/evidence add` 或 `/evidence import` 导入。
 
-`/auto <n>` 的 `n` 是调度步数，不是对话轮数。一次调度可能调用一个角色，也可能生成 clones 并触发 Merger。项目故意限制单次最多 3 步，避免早期错误判断被自动放大。
+`/auto <n>` 的 `n` 是调度步数，不是对话轮数。一次调度可能调用一个角色，也可能生成 clones 并触发 Merger。decision mode 仍限制单次最多 3 步，避免早期错误判断被自动放大；exploration mode 单次上限提高到 12 步，用于完成多假设生成、盲区扫描、资料路线、异常标记和关系图更新。
 
-真实 LLM 模式下，`/auto 3` 可能触发多次串行 API 调用。交互式 CLI 会打印步骤级即时输出：
+真实 LLM 模式下，`/auto 3` 或 exploration 中较大的 `/auto 6` 可能触发多次串行 API 调用。交互式 CLI 会打印步骤级即时输出：
 
 ```text
 [running] auto step 1: asking Chair for the next move
@@ -807,4 +814,4 @@ $env:KILLME_MOCK_LLM="0"
 uv run python main.py
 ```
 
-在真实使用时，建议从 `/auto 1` 开始，确认 Chair 调度合理后再使用 `/auto 3`。
+在真实使用时，decision mode 建议从 `/auto 1` 开始，确认 Chair 调度合理后再使用 `/auto 3`；exploration mode 可以逐步尝试 `/auto 4` 到 `/auto 8`，并用 `/map` 检查是否在保留分支和异常。

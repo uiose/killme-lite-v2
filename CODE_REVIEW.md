@@ -1,7 +1,7 @@
 # CODE_REVIEW.md
 
-审查版本：`killme-lite-v2.zip`  
-修改后版本：v3-review  
+审查版本：基于 `killme-lite-v2`  
+修改后版本：v0.3-review  
 审查重点：CLI 控制流、状态一致性、SQLite 生命周期、clone 上限、LLM 输出校验、命令语义、可测试性和发布包卫生。
 
 ## 1. 审查结论

@@ -146,17 +146,22 @@ Chair 提出 major question
 /explore killme-lite 的议程机制如何支持开放探索型研究问题
 ```
 
-Exploration mode 不自动调用 Judge，也不自动输出 `KILL / REDESIGN / TEST / BUILD`。它维护一张探索地图：
+Exploration mode 不自动调用 Judge，也不自动输出 `KILL / REDESIGN / TEST / BUILD`。它不是 decision mode 的预处理阶段，而是一等议程：可以长期保持开放、分支、回溯、深化，并维护一张探索地图。
 
 | 字段 | 用途 |
 |---|---|
-| `exploration_focus` | 当前开放探究主题 |
+| `exploration_status` | `open / paused / synthesized`，允许探索不转化 |
+| `exploration_clone_mode` | `independent / visible`，控制 clone 是否能看到 sibling 输出 |
+| `exploration_focus` | 当前开放探究主题或分支 |
 | `hypotheses` | 多个竞争性假设或解释 |
 | `research_threads` | 资料、概念、反例、基线等线索 |
 | `findings` | 阶段性发现，不等于 verdict |
 | `coverage_gaps` | 尚未扫描的覆盖缺口 |
+| `decision_candidates` | 可选的未来裁决节点，不是默认终点 |
+| `exploration_nodes` / `exploration_edges` | 假设、证据、缺口、异常之间的关系图 |
+| `anomalies` | 低共识但可能高价值的异常、边缘、矛盾线索 |
 
-当某条线索足够具体时，使用 `/mode decision` 把它转成可裁决节点。详见 `EXPLORATION_MODE.md`。
+常用探索命令包括 `/map`、`/focus <branch>`、`/clone-mode visible`。当某条线索确实需要裁决时，用户可以手动 `/mode decision`；系统不会默认把开放探索压缩成 verdict。详见 `EXPLORATION_MODE.md`。
 
 ### Evidence Pack
 
@@ -175,14 +180,14 @@ Exploration mode 不自动调用 Judge，也不自动输出 `KILL / REDESIGN / T
 - `config.py`、`.env.example`、`config.example.toml`、`pyproject.toml` 已纳入基础工程配置；
 - 使用 `uv` 管理虚拟环境、依赖、测试和 lint；
 - `agents/chair.md` 的 Chair `state_patch` allowlist 与 `validation.py` 对齐；
-- deterministic Merger 按 severity / confidence / evidence / support_count 排序；
+- deterministic Merger 在 decision mode 按 severity / confidence / evidence / support_count 排序；exploration mode 改用多样性、异常点、少数派线索优先；
 - Merger 支持 exact dedupe，并输出 `points`、`duplicates_removed`、`strongest_point`、`conflicts`、`state_patch`；
 - SQLite 保留 `sessions`、`turns`、`state_snapshots`、`clone_runs`；
 - clone group 开始、完成、失败均可追踪；
 - clone group 中途失败会写入 `system` error turn，且不会把部分 clone patch 写入 shared state；
-- `/close` 在 `judge_verdict = undecided` 时默认拒绝关闭；
-- `/close --force` 允许未裁决关闭，并标记 `closed_without_judgement: true`；
-- pytest 覆盖配置、validation、merger、clone failure、close guard 和核心流程。
+- `/close` 在 decision mode 且 `judge_verdict = undecided` 时默认拒绝关闭；exploration mode 可直接输出 synthesis；
+- `/close --force` 允许 decision mode 未裁决关闭，并标记 `closed_without_judgement: true`；
+- pytest 覆盖配置、validation、merger、exploration mode、visible clone mode、clone failure、close guard 和核心流程。
 
 ---
 
@@ -228,6 +233,9 @@ killme-lite/
 ```
 
 补充文档：
+
+- `EXPLORATION_MODE.md`：exploration mode 的设计动机、状态字段和推荐流程。
+- `NATIVE_EXPLORATION_UPGRADE.md`：回应探索模式结构性批评的二次升级记录。
 
 - `MVP_SPEC.md`：MVP 行为规格；
 - `USAGE.md`：使用方式与详细配置示例；
@@ -369,6 +377,11 @@ KILLME_JSON_RESPONSE_FORMAT=0 uv run python main.py
 
 ```text
 /start <idea>
+/explore <open-ended question>
+/mode [exploration|decision]
+/map
+/focus <branch-or-subquestion>
+/clone-mode <independent|visible>
 /auto 1
 /auto 2
 /auto 3
@@ -404,7 +417,12 @@ KILLME_JSON_RESPONSE_FORMAT=0 uv run python main.py
 说明：
 
 - `/start <idea>` 创建新的审议 session；
-- `/auto <n>` 让 Chair 自动推进 `n` 步，单次最多 3 步，超过上限会拒绝执行；
+- `/auto <n>` 让 Chair 自动推进 `n` 步；decision mode 单次最多 3 步，exploration mode 单次最多 12 步；
+- `/explore <question>` 创建开放探索 session；
+- `/mode [exploration|decision]` 查看或切换议程模式；
+- `/map` 显示 hypotheses / threads / findings / gaps / anomalies / relation graph 摘要；
+- `/focus <branch-or-subquestion>` 在 exploration mode 中切换研究分支；
+- `/clone-mode visible` 允许 exploration clone 看到同批 sibling 输出并延伸；`independent` 则保持冻结快照；
 - `/manual` 切回人工模式；
 - `/exec`、`/defend`、`/build`、`/judge` 是单实例调用；
 - `/spawn` 是显式 clone 命令，并严格遵守 `clone_limits`；
@@ -425,8 +443,8 @@ KILLME_JSON_RESPONSE_FORMAT=0 uv run python main.py
 - `/evidence request <keywords>` 手动记录一条待检索请求；
 - `/checkpoint` 保存当前 state snapshot；
 - `/config` 修改非 Chair 角色的 clone 上限；
-- `/close` 需要先有 Judge verdict；
-- `/close --force` 允许未裁决关闭，但会写入 `closed_without_judgement: true`；
+- `/close` 在 decision mode 需要先有 Judge verdict；在 exploration mode 输出 exploration synthesis；
+- `/close --force` 允许 decision mode 未裁决关闭，但会写入 `closed_without_judgement: true`；
 - `/reset` 会清空本地 `sessions`、`turns`、`state_snapshots`、`clone_runs`，是本地开发工具，不属于 MVP 审议协议核心命令；
 - `/quit` 退出 REPL。
 

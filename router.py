@@ -16,6 +16,7 @@ from state import (
     increment_round,
     merge_user_position,
     new_state,
+    normalize_clone_mode,
     pretty_state,
     reset_for_next_major_question,
 )
@@ -35,7 +36,9 @@ ROLE_COMMANDS = {
     "/build": "builder",
     "/judge": "judge",
 }
-AUTO_MAX_STEPS = 3
+DECISION_AUTO_MAX_STEPS = 3
+EXPLORATION_AUTO_MAX_STEPS = 12
+AUTO_MAX_STEPS = DECISION_AUTO_MAX_STEPS
 MAX_CONFIG_CLONES = MAX_CLONE_LIMIT
 
 
@@ -84,6 +87,15 @@ class Router:
 
         if command == "/mode":
             return self.cmd_mode(arg)
+
+        if command in {"/clone-mode", "/clones"}:
+            return self.cmd_clone_mode(arg)
+
+        if command == "/focus":
+            return self.cmd_focus(arg)
+
+        if command in {"/map", "/exploration-map"}:
+            return self.cmd_map()
 
         if command in ROLE_COMMANDS:
             return self.cmd_role(ROLE_COMMANDS[command])
@@ -148,7 +160,7 @@ class Router:
             f"Agenda mode：{state['agenda_mode']}\n"
             f"Current major question：{state['current_major_question']}\n"
             f"Question source：{question_source}\n"
-            f"建议下一步：/auto {AUTO_MAX_STEPS} 或 /exec；开放探究请用 /explore <question>"
+            f"建议下一步：/auto {DECISION_AUTO_MAX_STEPS} 或 /exec；开放探究请用 /explore <question>"
         )
 
     def cmd_explore(self, question: str) -> str:
@@ -169,23 +181,26 @@ class Router:
             f"Agenda mode：{state['agenda_mode']}\n"
             f"Exploration frame：{state['current_major_question']}\n"
             f"Frame source：{question_source}\n"
-            f"建议下一步：/auto {AUTO_MAX_STEPS}、/spawn defender 2 或 /evidence request <keywords>"
+            f"Clone mode：{state.get('exploration_clone_mode', 'independent')}\n"
+            f"建议下一步：/auto {min(6, EXPLORATION_AUTO_MAX_STEPS)}、/map、/clone-mode visible、/spawn defender 2 或 /evidence request <keywords>"
         )
 
     def cmd_auto(self, arg: str) -> str:
         state = self._require_state()
+        auto_limit = self._auto_max_steps(state)
         try:
             steps = int(arg.strip() or "1")
         except ValueError:
-            return f"用法：/auto <n>，例如 /auto {AUTO_MAX_STEPS}"
+            return f"用法：/auto <n>，当前模式最多 /auto {auto_limit}"
 
         if steps < 1:
             return "/auto 的步数必须 >= 1"
 
-        if steps > AUTO_MAX_STEPS:
+        if steps > auto_limit:
+            mode = state.get("agenda_mode", "decision")
             return (
-                f"/auto 的 MVP 硬上限是 {AUTO_MAX_STEPS}。"
-                "这是有限推进按钮，不是让 agent 自己聊完的放飞按钮。"
+                f"/auto {steps} 超过当前 {mode} mode 上限 {auto_limit}。"
+                "decision mode 保持短促收束；exploration mode 允许更长扫描，但仍保留上限以防无限循环。"
             )
 
         state["chair_mode"] = "auto"
@@ -252,8 +267,10 @@ class Router:
             return (
                 "## Mode\n"
                 f"- agenda_mode: {state.get('agenda_mode', 'decision')}\n"
-                f"- chair_mode: {state.get('chair_mode', 'manual')}\n\n"
-                "用法：/mode exploration 或 /mode decision"
+                f"- chair_mode: {state.get('chair_mode', 'manual')}\n"
+                f"- exploration_status: {state.get('exploration_status', 'open')}\n"
+                f"- exploration_clone_mode: {state.get('exploration_clone_mode', 'independent')}\n\n"
+                "用法：/mode exploration 或 /mode decision；clone 可见性用 /clone-mode visible|independent"
             )
         if value not in {"decision", "exploration"}:
             return "用法：/mode exploration 或 /mode decision"
@@ -262,8 +279,12 @@ class Router:
         state = increment_round(state)
         state["agenda_mode"] = value
         state["requires_user_intervention"] = True
-        if value == "exploration" and not state.get("exploration_focus"):
-            state["exploration_focus"] = state.get("core_claim", "")
+        if value == "exploration":
+            state["exploration_status"] = "open"
+            if not state.get("exploration_focus"):
+                state["exploration_focus"] = state.get("core_claim", "")
+        else:
+            state["exploration_status"] = "paused"
         self.storage.save_turn(
             state["session_id"],
             state["round"],
@@ -273,6 +294,74 @@ class Router:
         )
         self.storage.save_snapshot(state["session_id"], state)
         return f"已切换 agenda_mode：{previous} -> {value}。当前 Chair 会等待用户下一步。"
+
+    def cmd_clone_mode(self, arg: str = "") -> str:
+        state = self._require_state()
+        value = normalize_clone_mode(arg.strip())
+        if not value:
+            return (
+                "## Clone mode\n"
+                f"- exploration_clone_mode: {state.get('exploration_clone_mode', 'independent')}\n\n"
+                "用法：/clone-mode independent 或 /clone-mode visible"
+            )
+        previous = state.get("exploration_clone_mode", "independent")
+        state = increment_round(state)
+        state["exploration_clone_mode"] = value
+        state["requires_user_intervention"] = True
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "user",
+            f"/clone-mode {value}",
+            {"command": "clone-mode", "previous": previous, "exploration_clone_mode": value},
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        if value == "visible":
+            return f"已切换 exploration_clone_mode：{previous} -> visible。探索模式下同批 clone 会按顺序看到前面 sibling 的输出，但 state 仍等 Merger 后统一写入。"
+        return f"已切换 exploration_clone_mode：{previous} -> independent。同批 clone 将继续使用冻结快照独立评审。"
+
+    def cmd_focus(self, arg: str = "") -> str:
+        state = self._require_state()
+        focus = arg.strip()
+        if not focus:
+            return "用法：/focus <exploration branch or subquestion>"
+        if state.get("agenda_mode") != "exploration":
+            return "只有 agenda_mode=exploration 时才能 /focus。请先 /mode exploration。"
+        state = increment_round(state)
+        previous_focus = state.get("exploration_focus", "")
+        state["exploration_focus"] = focus
+        state["current_major_question"] = f"围绕「{focus}」，它关联哪些假设、证据、异常点和覆盖缺口，下一轮应如何继续探索？"
+        state["exploration_status"] = "open"
+        node = {
+            "id": f"focus:{uuid.uuid4().hex[:8]}",
+            "type": "focus",
+            "label": focus,
+            "summary": "用户选择的探索分支",
+            "source_role": "user",
+        }
+        edge = {
+            "source": "focus:current",
+            "target": node["id"],
+            "relation": "refocused_to",
+            "summary": f"Exploration focus changed from {previous_focus or 'initial focus'} to {focus}",
+        }
+        state["exploration_nodes"] = self._append_unique_state_item(state.get("exploration_nodes"), node)
+        state["exploration_edges"] = self._append_unique_state_item(state.get("exploration_edges"), edge)
+        state["research_threads"] = self._append_unique_state_item(state.get("research_threads"), focus)
+        state["requires_user_intervention"] = False
+        self.storage.save_turn(
+            state["session_id"],
+            state["round"],
+            "user",
+            f"/focus {focus}",
+            {"command": "focus", "previous_focus": previous_focus, "new_focus": focus},
+        )
+        self.storage.save_snapshot(state["session_id"], state)
+        return "已切换探索焦点。\n\n" + self._format_exploration_map(state)
+
+    def cmd_map(self) -> str:
+        state = self._require_state()
+        return self._format_exploration_map(state)
 
     def cmd_role(self, role: str) -> str:
         result, updated = self._run_role(
@@ -614,6 +703,9 @@ class Router:
             current_task="Decide next deliberation step.",
         )
         decision = validate_chair_decision(raw_decision, state)
+        original_agenda_mode = state.get("agenda_mode", "decision")
+        if original_agenda_mode == "exploration":
+            decision = self._guard_exploration_auto_decision(decision)
 
         state = increment_round(state)
         self.storage.save_turn(
@@ -627,20 +719,6 @@ class Router:
         self.storage.save_snapshot(state["session_id"], state)
 
         decision_type = decision["decision_type"]
-        if state.get("agenda_mode") == "exploration" and decision_type in {"judge", "close_question"}:
-            decision_type = "wait_user"
-            decision["decision_type"] = "wait_user"
-            decision["role_to_call"] = None
-            decision["clone_count"] = 0
-            decision["reason"] = (
-                "exploration mode blocks automatic judge/close; keep the map open until the user "
-                "explicitly switches to /mode decision or runs /close for a synthesis."
-            )
-            decision["message_to_user"] = (
-                "探索模式不会自动裁决或关闭。可以继续 /auto、补 evidence，"
-                "或用 /mode decision 把某条线索转成可裁决节点。"
-            )
-
         self._progress(f"auto step {auto_step}: Chair decided {decision_type}")
         self._emit_chair_decision(decision)
         if decision_type == "wait_user":
@@ -683,6 +761,43 @@ class Router:
 
         return f"Chair decision_type 未实现：{decision_type}\n{json.dumps(decision, ensure_ascii=False, indent=2)}"
 
+    def _guard_exploration_auto_decision(self, decision: Dict[str, Any]) -> Dict[str, Any]:
+        decision = dict(decision)
+        patch = dict(decision.get("state_patch") or {})
+        warnings = list(decision.get("validation_warnings") or [])
+
+        if "agenda_mode" in patch:
+            patch.pop("agenda_mode", None)
+            warnings.append("exploration_auto_agenda_mode_patch_ignored")
+
+        decision_type = decision.get("decision_type")
+        role_to_call = decision.get("role_to_call")
+        if decision_type in {"judge", "close_question"} or role_to_call == "judge":
+            patch["requires_user_intervention"] = True
+            patch["exploration_status"] = "open"
+            decision.update(
+                {
+                    "decision_type": "wait_user",
+                    "role_to_call": None,
+                    "clone_count": 0,
+                    "clone_tasks": [],
+                    "reason": (
+                        "exploration mode blocks automatic judge/close; keep the map open unless the "
+                        "user explicitly asks for /close synthesis or switches to /mode decision."
+                    ),
+                    "requires_user_intervention": True,
+                    "message_to_user": (
+                        "探索模式不会自动裁决或关闭。可以继续 /auto、/focus 深挖、补 evidence，"
+                        "也可以在用户明确需要时才用 /mode decision。"
+                    ),
+                }
+            )
+            warnings.append("exploration_auto_judge_close_blocked")
+
+        decision["state_patch"] = patch
+        decision["validation_warnings"] = warnings
+        return decision
+
     def _run_role(
         self,
         role: str,
@@ -708,21 +823,43 @@ class Router:
 
         outputs: List[Dict[str, Any]] = []
         run_state = ensure_shape(copy.deepcopy(base_state_snapshot))
+        clone_context_mode = "independent"
+        if (
+            len(clone_tasks) > 1
+            and base_state_snapshot.get("agenda_mode") == "exploration"
+            and base_state_snapshot.get("exploration_clone_mode") == "visible"
+        ):
+            clone_context_mode = "visible"
+        visible_recent = copy.deepcopy(recent_snapshot)
 
         try:
             for index, clone in enumerate(clone_tasks, start=1):
-                # All clones receive the same state and recent-turn snapshot. No clone
-                # sees state patches or turns produced by siblings in this batch.
+                # In decision mode, clones stay independent. In exploration mode,
+                # /clone-mode visible lets later clones see sibling outputs as
+                # brainstorming context, but state patches still wait for Merger.
                 clone_name = clone.get("name") or role
                 self._progress(f"calling {clone_name} ({index}/{len(clone_tasks)})")
-                raw_output = self.llm.call_agent(
-                    role,
-                    state=copy.deepcopy(base_state_snapshot),
-                    recent_turns=copy.deepcopy(recent_snapshot),
-                    current_task=clone.get("task") or task,
-                    clone_name=clone_name,
-                    angle=clone.get("angle"),
-                )
+                try:
+                    raw_output = self.llm.call_agent(
+                        role,
+                        state=copy.deepcopy(base_state_snapshot),
+                        recent_turns=copy.deepcopy(visible_recent if clone_context_mode == "visible" else recent_snapshot),
+                        current_task=clone.get("task") or task,
+                        clone_name=clone_name,
+                        angle=clone.get("angle"),
+                        clone_context_mode=clone_context_mode,
+                    )
+                except TypeError as exc:
+                    if "clone_context_mode" not in str(exc):
+                        raise
+                    raw_output = self.llm.call_agent(
+                        role,
+                        state=copy.deepcopy(base_state_snapshot),
+                        recent_turns=copy.deepcopy(visible_recent if clone_context_mode == "visible" else recent_snapshot),
+                        current_task=clone.get("task") or task,
+                        clone_name=clone_name,
+                        angle=clone.get("angle"),
+                    )
                 self._progress(f"{clone_name} returned; saving turn")
                 output = validate_agent_output(role, raw_output, base_state_snapshot)
                 self._emit_agent_result(clone_name, output)
@@ -738,13 +875,29 @@ class Router:
                         "role": role,
                         "angle": clone.get("angle"),
                         "clone_group_id": clone_group_id or None,
-                        "clone_independent": len(clone_tasks) > 1,
+                        "clone_independent": len(clone_tasks) > 1 and clone_context_mode == "independent",
+                        "clone_context_mode": clone_context_mode,
+                        "sibling_outputs_visible": clone_context_mode == "visible" and index > 1,
                         "independent_snapshot": len(clone_tasks) > 1,
                         "input_state_round": base_state_snapshot.get("round"),
                         "state_snapshot_round": base_state_snapshot.get("round"),
                         "state_patch_applied": len(clone_tasks) == 1,
                     },
                 )
+                if clone_context_mode == "visible":
+                    visible_recent.append(
+                        {
+                            "round": run_state["round"],
+                            "speaker": clone_name,
+                            "content": json.dumps(output, ensure_ascii=False, indent=2),
+                            "metadata": {
+                                "role": role,
+                                "angle": clone.get("angle"),
+                                "clone_group_id": clone_group_id or None,
+                                "clone_context_mode": clone_context_mode,
+                            },
+                        }
+                    )
 
             if len(outputs) > 1:
                 self._progress(f"merging {len(outputs)} {role} clone output(s)")
@@ -759,8 +912,9 @@ class Router:
                     {
                         "source_role": role,
                         "clone_group_id": clone_group_id,
-                        "merged_after_independent_clones": True,
-                        "merged_independent_clones": True,
+                        "merged_after_independent_clones": clone_context_mode == "independent",
+                        "merged_independent_clones": clone_context_mode == "independent",
+                        "clone_context_mode": clone_context_mode,
                         "input_state_round": base_state_snapshot.get("round"),
                         "state_snapshot_round": base_state_snapshot.get("round"),
                     },
@@ -869,7 +1023,8 @@ class Router:
                 "but treat it as an exploration frame, not a decision node. "
                 "Do not call any role, do not attack, defend, judge, close, or force a verdict. "
                 "The frame must preserve multiple hypotheses, source-discovery paths, adjacent concepts, "
-                "and open unknowns without reducing the question to yes/no feasibility."
+                "evidence-hypothesis relations, anomalies, and open unknowns without reducing the "
+                "question to yes/no feasibility or treating decision conversion as the default endpoint."
             )
         else:
             task = (
@@ -944,7 +1099,7 @@ class Router:
     def _fallback_initial_major_question(self, idea: str, agenda_mode: str = "decision") -> str:
         idea = self._clip_inline_text(idea.strip() or "这个想法", limit=80)
         if agenda_mode == "exploration":
-            return f"围绕「{idea}」，先展开哪些定义、相邻问题、竞争性假设和资料路径，才能避免过早收敛？"
+            return f"围绕「{idea}」，哪些定义、竞争性假设、相邻领域、证据关系和异常点值得先展开，而不急于形成裁决？"
         return f"围绕「{idea}」，最需要先澄清的核心定义、适用边界和可证伪标准是什么？"
 
     def _is_contextual_question(self, text: str) -> bool:
@@ -1145,6 +1300,8 @@ class Router:
             f"- agenda_mode: {state.get('agenda_mode', 'decision')}",
             f"- core_claim: {state.get('core_claim', '')}",
             f"- exploration_focus: {state.get('exploration_focus') or '暂无'}",
+            f"- exploration_status: {state.get('exploration_status') or '暂无'}",
+            f"- exploration_clone_mode: {state.get('exploration_clone_mode') or 'independent'}",
             f"- current_major_question: {state.get('current_major_question', '')}",
             f"- user_position: {state.get('user_position', '')}",
             f"- strongest_attack: {state.get('strongest_attack') or '暂无'}",
@@ -1163,6 +1320,10 @@ class Router:
                     "research_threads": state.get("research_threads") or [],
                     "findings": state.get("findings") or [],
                     "coverage_gaps": state.get("coverage_gaps") or [],
+                    "decision_candidates": state.get("decision_candidates") or [],
+                    "anomalies": state.get("anomalies") or [],
+                    "exploration_nodes": state.get("exploration_nodes") or [],
+                    "exploration_edges": state.get("exploration_edges") or [],
                 }
             ),
             "",
@@ -1303,14 +1464,21 @@ Coverage gaps:
 Evidence requests:
 {json.dumps(state.get('evidence_requests') or [], ensure_ascii=False, indent=2)}
 
-Candidate decision nodes:
-{'; '.join(state.get('open_questions') or ['从上述假设中选择一条，切换 /mode decision 后再裁决。'])}
+Decision candidates, optional:
+{'; '.join(state.get('decision_candidates') or state.get('open_questions') or ['暂无；探索可以继续，不必强行转裁决。'])}
+
+Anomalies / weak signals:
+{'; '.join(state.get('anomalies') or ['暂无明确异常点。'])}
+
+Graph snapshot:
+- nodes: {len(state.get('exploration_nodes') or [])}
+- edges: {len(state.get('exploration_edges') or [])}
 
 Mode recommendation:
 MANUAL
 
 Reason:
-这是探索综合，不是 verdict。下一步应补资料、选择研究线索，或把某条线索转成 decision node。"""
+这是探索综合，不是 verdict。下一步可以补资料、/focus 深挖分支、继续 /auto，或在用户明确选择时才转入 decision。"""
 
         return f"""## Chair closing statement
 
@@ -1343,6 +1511,47 @@ MANUAL
 Reason:
 需要用户确认下一问题或补充真实约束。"""
 
+    def _format_exploration_map(self, state: Dict[str, Any]) -> str:
+        state = ensure_shape(state)
+        nodes = state.get("exploration_nodes") or []
+        edges = state.get("exploration_edges") or []
+        hypotheses = state.get("hypotheses") or []
+        threads = state.get("research_threads") or []
+        findings = state.get("findings") or []
+        gaps = state.get("coverage_gaps") or []
+        candidates = state.get("decision_candidates") or []
+        anomalies = state.get("anomalies") or []
+
+        def tail(items: List[Any], limit: int = 8) -> str:
+            return json.dumps(items[-limit:] if items else ["暂无"], ensure_ascii=False, indent=2)
+
+        return (
+            "## Exploration map\n"
+            f"- agenda_mode: {state.get('agenda_mode', 'decision')}\n"
+            f"- exploration_status: {state.get('exploration_status', 'open')}\n"
+            f"- exploration_clone_mode: {state.get('exploration_clone_mode', 'independent')}\n"
+            f"- exploration_focus: {state.get('exploration_focus') or state.get('core_claim')}\n"
+            f"- current_frame: {state.get('current_major_question')}\n"
+            f"- graph_nodes: {len(nodes)}\n"
+            f"- graph_edges: {len(edges)}\n\n"
+            "### Hypotheses\n"
+            f"{tail(hypotheses)}\n\n"
+            "### Research threads\n"
+            f"{tail(threads)}\n\n"
+            "### Findings\n"
+            f"{tail(findings)}\n\n"
+            "### Coverage gaps\n"
+            f"{tail(gaps)}\n\n"
+            "### Anomalies / weak signals\n"
+            f"{tail(anomalies)}\n\n"
+            "### Decision candidates (optional, not terminal)\n"
+            f"{tail(candidates)}\n\n"
+            "### Graph nodes\n"
+            f"{tail(nodes, 12)}\n\n"
+            "### Graph edges\n"
+            f"{tail(edges, 12)}"
+        )
+
     def _format_summary(self, state: Dict[str, Any]) -> str:
         history_count = len(state.get("major_question_history") or [])
         open_questions = state.get("open_questions") or []
@@ -1353,15 +1562,25 @@ Reason:
         threads = state.get("research_threads") or []
         findings = state.get("findings") or []
         gaps = state.get("coverage_gaps") or []
+        candidates = state.get("decision_candidates") or []
+        anomalies = state.get("anomalies") or []
+        nodes = state.get("exploration_nodes") or []
+        edges = state.get("exploration_edges") or []
         exploration_lines = ""
         if state.get("agenda_mode") == "exploration":
             exploration_lines = (
                 "## Exploration map\n"
                 f"- exploration_focus: {state.get('exploration_focus') or state.get('core_claim')}\n"
+                f"- exploration_status: {state.get('exploration_status', 'open')}\n"
+                f"- exploration_clone_mode: {state.get('exploration_clone_mode', 'independent')}\n"
+                f"- graph_nodes: {len(nodes)}\n"
+                f"- graph_edges: {len(edges)}\n"
                 f"- recent_hypotheses: {json.dumps(hypotheses[-3:] if hypotheses else ['暂无'], ensure_ascii=False)}\n"
                 f"- recent_research_threads: {json.dumps(threads[-3:] if threads else ['暂无'], ensure_ascii=False)}\n"
                 f"- recent_findings: {json.dumps(findings[-3:] if findings else ['暂无'], ensure_ascii=False)}\n"
                 f"- recent_coverage_gaps: {json.dumps(gaps[-3:] if gaps else ['暂无'], ensure_ascii=False)}\n"
+                f"- recent_anomalies: {json.dumps(anomalies[-3:] if anomalies else ['暂无'], ensure_ascii=False)}\n"
+                f"- decision_candidates_optional: {json.dumps(candidates[-3:] if candidates else ['暂无'], ensure_ascii=False)}\n"
             )
         return (
             "## Session summary\n"
@@ -1382,7 +1601,7 @@ Reason:
             f"- recent_evidence_requests: {json.dumps(last_evidence_requests, ensure_ascii=False)}\n"
             f"- recent_open_questions: {json.dumps(last_open, ensure_ascii=False)}\n"
             f"{exploration_lines}"
-            "- useful_commands: /mode, /explore <question>, /position, /position add <text>, /evidence, /evidence add <text-or-json>, /auto 3, /exec, /spawn <role> <n>, /defend, /build, /judge, /close, /close --force"
+            "- useful_commands: /mode, /explore <question>, /map, /focus <branch>, /clone-mode visible|independent, /position, /evidence, /evidence add <text-or-json>, /auto <n>, /spawn <role> <n>, /exec, /defend, /build, /judge, /close"
         )
 
     def _format_chair_decision(self, decision: Dict[str, Any]) -> str:
@@ -1409,7 +1628,16 @@ Reason:
         )
         state_patch = result.get("state_patch") or {}
         exploration_payload = {}
-        for key in ("hypotheses", "research_threads", "findings", "coverage_gaps"):
+        for key in (
+            "hypotheses",
+            "research_threads",
+            "findings",
+            "coverage_gaps",
+            "decision_candidates",
+            "exploration_nodes",
+            "exploration_edges",
+            "anomalies",
+        ):
             value = result.get(key) or state_patch.get(key)
             if value:
                 exploration_payload[key] = value
@@ -1423,7 +1651,7 @@ Reason:
             return (
                 "### Merger result\n"
                 f"- source_role: {result.get('source_role')}\n"
-                "- clone_input: same frozen state + recent turns snapshot\n"
+                f"- clone_input: {('visible sibling context' if self._require_state().get('exploration_clone_mode') == 'visible' and self._require_state().get('agenda_mode') == 'exploration' else 'same frozen state + recent turns snapshot')}\n"
                 f"- strongest_point: {result.get('strongest_point')}\n"
                 f"- merged_points: {json.dumps(result.get('merged_points', []), ensure_ascii=False, indent=2)}"
                 f"{evidence_text}"
@@ -1461,24 +1689,24 @@ Reason:
                 "executioner": [
                     "scan premature closure and false dichotomies",
                     "map missing evidence and source blind spots",
-                    "surface underexplored counter-hypotheses",
+                    "mark anomalies and weak signals",
                 ],
                 "defender": [
                     "generate plausible competing hypotheses",
                     "connect adjacent concepts and literatures",
-                    "charitably expand possible mechanisms",
+                    "map competing mechanism families",
                 ],
                 "builder": [
                     "design source discovery plan",
-                    "design research space scan",
+                    "design relationship graph and source scan",
                     "turn unknowns into next probes",
                 ],
                 "judge": [
-                    "assess readiness to convert into decision node",
-                    "identify what remains too open to judge",
+                    "assess optional readiness for decision mode",
+                    "identify what should remain open",
                 ],
             }.get(role, ["single exploratory angle"])
-            task_prefix = "Explore current frame from angle"
+            task_prefix = "Expand the exploration map from angle"
         else:
             angles = {
                 "executioner": [
@@ -1508,6 +1736,11 @@ Reason:
             }
             for i in range(count)
         ]
+
+    def _auto_max_steps(self, state: Dict[str, Any]) -> int:
+        if state.get("agenda_mode") == "exploration":
+            return EXPLORATION_AUTO_MAX_STEPS
+        return DECISION_AUTO_MAX_STEPS
 
     def _require_state(self) -> Dict[str, Any]:
         state = self.storage.load_latest_state(self._active_session_id())
